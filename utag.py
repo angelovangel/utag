@@ -1438,6 +1438,8 @@ def cmd_tagqc(a):
         print()
         print_note("tags share a leading base: barbell folds it into the flank (the barcode region is 1 nt shorter)")
     plate_map_report(a, tags, plates)
+    if a.print_map and os.path.exists(a.plates):
+        print_plate_map(a.plates, a.print_map)
 
 
 def id_ranges(ids):
@@ -1534,6 +1536,58 @@ def plate_map_report(a, tags, layout):
         kv.append(("decoys", f"{len(d_fwd - {r['utag-fwd'] for r in layout})} fwd + {len(d_rev - {r['utag-rev'] for r in layout})} rev tags; "
                              f"{fmt_int(len(pairs - used))} plate-map wells not in the sheet are reported as unexpected"))
         print_kv(kv)
+
+
+TAG_PALETTE = [196, 34, 33, 208, 129, 37, 201, 70, 63, 172, 31, 163,     # 256-colour codes, readable on dark and light
+               160, 28, 25, 166, 91, 30, 125, 64, 99, 136, 39, 168]
+
+
+def print_plate_map(path, mode):
+    """tagqc --print: every plate-map well with its tags, listed column by column (A1, B1, ..), row by row
+    (A1, A2, ..) or drawn as a plate grid (one line per tag in each plate row)."""
+    design = [r for r in read_plates(path) if r["well"]]
+    nat = lambda p: [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", p)]
+    well_rc = lambda w: (w[0], int(w[1:]))
+    has_ont = any(r["ont"] for r in design)
+    sides = [("fwd", "utag-fwd"), ("rev", "utag-rev")] + ([("ONT", "ont")] if has_ont else [])
+    # one colour per tag ID (U001 is the same colour as fwd or rev, in the list and the grid); neighbouring IDs differ
+    ids = sorted({r[k] for r in design for _, k in sides if r[k]}, key=nat)
+    for c in TAG_PALETTE:
+        ANSI.setdefault(f"c{c}", f"\033[38;5;{c}m")
+    tag_code = {t: f"c{TAG_PALETTE[i % len(TAG_PALETTE)]}" for i, t in enumerate(ids)}
+    tc = lambda t: style(t, tag_code.get(t, ""))
+    print_step(f"plate map wells ({mode}): {rel(path)}")
+    if mode != "plate":
+        order = (lambda r: (nat(r["plate"]), well_rc(r["well"])[1], well_rc(r["well"])[0])) if mode == "columnwise" else \
+                (lambda r: (nat(r["plate"]), well_rc(r["well"])))
+        print_table(["plate", "well"] + [k if k != "ont" else "ont-barcode" for _, k in sides],
+                    [[style(r["plate"], "cyan"), style(r["well"], "bold")] + [tc(r[k]) for _, k in sides]
+                     for r in sorted(design, key=order)], indent=4)
+        return
+    by_plate = defaultdict(dict)
+    for r in design:
+        by_plate[r["plate"]][well_rc(r["well"])] = r
+    for plate in sorted(by_plate, key=nat):
+        wells = by_plate[plate]
+        letters = [chr(c) for c in range(ord("A"), ord(max(l for l, _ in wells)) + 1)]
+        cols = range(1, max(c for _, c in wells) + 1)
+        w = max(len(r[k]) for r in wells.values() for _, k in sides)
+        # box lines around the wells: one cell per well, one box row per plate row
+        hz, vt = ("─", "│") if UNI else ("-", "|")
+        rule = lambda l, m, r: "    " + " " * 9 + style(l + m.join(hz * (w + 2) for _ in cols) + r, "gray")
+        corners = [("┌", "┬", "┐"), ("├", "┼", "┤"), ("└", "┴", "┘")] \
+            if UNI else [("+", "+", "+")] * 3
+        bar_ = style(vt, "gray")
+        print()
+        print("    " + cpad(plate, 9, "<", "bold", "cyan") + " " + " ".join(cpad(c, w + 2, "^", "bold") for c in cols))
+        print(rule(*corners[0]))
+        for j, l in enumerate(letters):
+            for i, (lab, k) in enumerate(sides):
+                cells = [pad(tc(wells[(l, c)][k]), w, ">") if (l, c) in wells else cpad(SYM["dot"], w, ">", "gray")
+                         for c in cols]
+                print("    " + cpad(l if i == 0 else "", 4, "<", "bold") + cpad(lab, 5, "<", "gray")
+                      + bar_ + bar_.join(f" {x} " for x in cells) + bar_)
+            print(rule(*corners[1 if j < len(letters) - 1 else 2]))
 
 
 class Tee:
@@ -1657,6 +1711,9 @@ def main():
 
     t = sp.add_parser("tagqc", epilog=INPUT_HELP, formatter_class=raw, help="check the tag set, plate map layout and sample sheet coverage")
     common(t)
+    t.add_argument("--print", dest="print_map", choices=["columnwise", "rowwise", "plate"],
+                   help="also print every plate-map well with its tags: listed column by column (A1, B1, ..), "
+                        "row by row (A1, A2, ..), or as a plate grid")
     t.set_defaults(fn=cmd_tagqc)
 
     a = ap.parse_args()

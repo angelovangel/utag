@@ -4,6 +4,7 @@ plate-heatmap.py - plate heatmap of read counts per well, from the summary.tsv w
 
     plate-heatmap.py demux_out/summary.tsv -o plates.html
     plate-heatmap.py twopass_out/summary.tsv --scale linear --per-plate
+    plate-heatmap.py demux_out/summary.tsv --palette viridis                # also cividis, magma, inferno, YlGnBu, Blues
     plate-heatmap.py old_summary.tsv --map plate_map.csv            # summaries without plate/well columns
 
 Writes ONE self-contained HTML file (no internet, no dependencies) that shows every plate as a well grid coloured
@@ -151,6 +152,8 @@ def main():
     ap.add_argument("--title", help="page title (default: the summary's folder name)")
     ap.add_argument("--map", help="CSV/TSV with columns sample,well[,plate]; only needed for summaries without plate/well columns")
     ap.add_argument("--scale", choices=["log", "sqrt", "linear"], default="log", help="initial colour scale (default log)")
+    ap.add_argument("--palette", choices=["YlOrRd", "viridis", "cividis", "magma", "inferno", "YlGnBu", "Blues"],
+                    default="YlOrRd", help="initial colour palette (default YlOrRd; cividis is safest for colour-blind viewers)")
     ap.add_argument("--per-plate", action="store_true", help="start with the colour range set per plate instead of globally")
     ap.add_argument("--names", nargs=2, metavar=("A", "B"), default=["Group A", "Group B"], help="initial group names")
     a = ap.parse_args()
@@ -159,7 +162,7 @@ def main():
     wells, panels, unplaced = build(rows, load_map(a.map) if a.map else {})
     out = a.output or os.path.join(os.path.dirname(os.path.abspath(a.summary)), "plates.html")
     title = a.title or (os.path.basename(os.path.dirname(os.path.abspath(a.summary))) or "plates") + " - reads per well"
-    data = dict(title=title, wells=wells, panels=panels, scale=a.scale, perPlate=a.per_plate, names=a.names)
+    data = dict(title=title, wells=wells, panels=panels, scale=a.scale, palette=a.palette, perPlate=a.per_plate, names=a.names)
     payload = json.dumps(data, separators=(",", ":")).replace("<", "\\u003c")
     html = TEMPLATE.replace("__TITLE__", title.replace("<", "&lt;")).replace("__DATA__", payload)
     with open(out, "w", encoding="utf-8") as fh:
@@ -267,6 +270,7 @@ dt{color:var(--dim)}dd{margin:0;text-align:right;font-variant-numeric:tabular-nu
     <div class="sub" id="overall"></div>
     <div class="controls">
       <label>colour scale <select id="scale"><option value="log">log</option><option value="sqrt">sqrt</option><option value="linear">linear</option></select></label>
+      <label>palette <select id="palette"></select></label>
       <label>range <select id="range"><option value="global">all plates</option><option value="plate">per plate</option></select></label>
       <label>well labels <select id="labels"><option value="compact">compact</option><option value="exact">exact</option><option value="utags">utags</option><option value="none">none</option></select></label>
       <div class="legend"><span class="zero" title="0 reads"></span><span>0</span><span id="lo"></span><div class="bar" id="bar"></div><span id="hi"></span></div>
@@ -283,7 +287,7 @@ const D = JSON.parse(document.getElementById('data').textContent);
 const wells = D.wells, panels = D.panels;
 const byId = new Map(wells.map(w => [w.id, w]));
 const KEY = 'plate-heatmap:' + D.title + ':' + wells.length;
-const state = {mode: 'A', drag: 'box', scale: D.scale || 'log', range: D.perPlate ? 'plate' : 'global', labels: 'compact', groups: {}, names: D.names.slice()};
+const state = {mode: 'A', drag: 'box', scale: D.scale || 'log', palette: D.palette || 'YlOrRd', range: D.perPlate ? 'plate' : 'global', labels: 'compact', groups: {}, names: D.names.slice()};
 try {
   const s = JSON.parse(localStorage.getItem(KEY) || 'null');
   if (s) { for (const [id, g] of Object.entries(s.groups || {})) if (byId.has(id)) state.groups[id] = g; if (s.names) state.names = s.names; }
@@ -305,15 +309,26 @@ const median = a => { if (!a.length) return 0; const s = a.slice().sort((x, y) =
 const GC = {A: 'var(--A)', B: 'var(--B)'};
 const gname = g => state.names[g === 'A' ? 0 : 1] || ('Group ' + g);
 
-// ---------- colour (YlOrRd)
-const STOPS = [[0.000,[255,255,204]],[0.125,[255,237,160]],[0.250,[254,217,118]],[0.375,[254,178,76]],[0.500,[253,141,60]],[0.625,[252,78,42]],[0.750,[227,26,28]],[0.875,[189,0,38]],[1.000,[128,0,38]]];
+// ---------- colour: sequential palettes only (read counts are magnitudes), low -> high
+// matplotlib (perceptually uniform; cividis also reads under colour-blindness) and ColorBrewer ramps.
+// Light-starting ramps begin one step in, so low counts stay distinct from the grey of 0-read wells.
+const PALETTES = {
+  YlOrRd:  ['#ffffcc', '#ffeda0', '#fed976', '#feb24c', '#fd8d3c', '#fc4e2a', '#e31a1c', '#bd0026', '#800026'],
+  viridis: ['#440154', '#472d7b', '#3b528b', '#2c728e', '#21918c', '#28ae80', '#5ec962', '#addc30', '#fde725'],
+  cividis: ['#00224e', '#123570', '#3b496c', '#575d6d', '#707173', '#8a8779', '#a69d75', '#c4b56c', '#fee838'],
+  magma:   ['#000004', '#1c1044', '#4f127b', '#812581', '#b5367a', '#e55964', '#fb8761', '#fec287', '#fcfdbf'],
+  inferno: ['#000004', '#1f0c48', '#550f6d', '#88226a', '#ba3655', '#e35933', '#f98e09', '#f9cb35', '#fcffa4'],
+  YlGnBu:  ['#edf8b1', '#c7e9b4', '#7fcdbb', '#41b6c4', '#1d91c0', '#225ea8', '#253494', '#081d58'],
+  Blues:   ['#c6dbef', '#9ecae1', '#6baed6', '#4292c6', '#2171b5', '#08519c', '#08306b'],
+};
+const hex2rgb = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
+const PAL_RGB = Object.fromEntries(Object.entries(PALETTES).map(([k, v]) => [k, v.map(hex2rgb)]));
+if (!PAL_RGB[state.palette]) state.palette = 'YlOrRd';
 function cmap(t) {
-  t = Math.max(0, Math.min(1, t));
-  for (let i = 1; i < STOPS.length; i++) if (t <= STOPS[i][0]) {
-    const [t0, c0] = STOPS[i - 1], [t1, c1] = STOPS[i], f = (t - t0) / (t1 - t0 || 1);
-    return c0.map((v, k) => Math.round(v + (c1[k] - v) * f));
-  }
-  return STOPS[STOPS.length - 1][1];
+  const P = PAL_RGB[state.palette], n = P.length - 1;
+  t = Math.max(0, Math.min(1, t)) * n;
+  const i = Math.min(n - 1, Math.floor(t)), f = t - i;
+  return P[i].map((v, k) => Math.round(v + (P[i + 1][k] - v) * f));
 }
 const rgb = c => `rgb(${c[0]},${c[1]},${c[2]})`;
 const TF = {log: v => Math.log10(v + 1), sqrt: v => Math.sqrt(v), linear: v => v};
@@ -371,7 +386,8 @@ const panelWells = panels.map(p => wells.filter(w => w.panel === p.i));
 $('#title').textContent = D.title;
 const allReads = sum(wells.map(w => w.reads));
 $('#overall').textContent = `${fmt(allReads)} reads \u00b7 ${wells.filter(w => w.reads > 0).length}/${wells.length} wells with reads \u00b7 ${panels.length} panel${panels.length > 1 ? 's' : ''}`;
-$('#scale').value = state.scale; $('#range').value = state.range;
+$('#palette').innerHTML = Object.keys(PALETTES).map(k => `<option>${k}</option>`).join('');
+$('#scale').value = state.scale; $('#range').value = state.range; $('#palette').value = state.palette;
 function legend() {
   const stops = Array.from({length: 17}, (_, i) => rgb(cmap(i / 16)) + ' ' + (i / 16 * 100).toFixed(0) + '%').join(',');
   $('#bar').style.background = `linear-gradient(90deg,${stops})`;
@@ -379,7 +395,7 @@ function legend() {
   $('#hi').textContent = state.range === 'plate' ? 'max (per plate)' : fmt(globalR.hi);
   $('#bar').title = {log: 'log10 scale', sqrt: 'square-root scale', linear: 'linear scale'}[state.scale];
 }
-for (const id of ['scale', 'range', 'labels']) $('#' + id).addEventListener('change', e => { state[id] = e.target.value; legend(); decorateAll(); });
+for (const id of ['scale', 'palette', 'range', 'labels']) $('#' + id).addEventListener('change', e => { state[id] = e.target.value; legend(); decorateAll(); });
 
 // ---------- selection
 let paintTo = null, painting = false, rafSide = 0, drag = null;

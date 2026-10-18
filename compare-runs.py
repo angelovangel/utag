@@ -3,7 +3,7 @@
 compare-runs.py - compare utag runs side by side, from the utag.log files written by utag.py.
 
     compare-runs.py demux_out/utag.log run2/utag.log
-    compare-runs.py demux_out run2 twopass_out -o comparison           # folders: <folder>/utag.log
+    compare-runs.py demux_out run2 twopass_out -o nbd_vs_lsk           # folders: <folder>/utag.log
     compare-runs.py runs/ --labels default fme2 lsk --baseline fme2    # a folder holding several runs
 
 Every argument is a utag.log or a folder. A folder with a utag.log is one run, otherwise every utag.log below it
@@ -19,11 +19,11 @@ demux and twopass name two metrics differently; both are reported under the twop
     reads_assigned_to_wells -> reads_assigned_to_samples, wells_with_reads -> samples_with_reads,
     wells_expected -> samples_expected
 
-Writes
-    <out>.csv           one row per metric, one column per run, then <run>_vs_<baseline> difference columns
-    <out>_samples.csv   reads per sample and run (only when a summary.tsv was found)
-    <out>.html          ONE self-contained page (no internet): read fate and pattern charts, metrics table with a
-                        selectable baseline, top patterns, ONT bins, per-sample scatter of any two runs
+Writes, into the output folder (-o, default compare_out/)
+    run_comparison.csv    one row per metric, one column per run, then <run>_vs_<baseline> difference columns
+    samples.csv           reads per sample and run (only when a summary.tsv was found)
+    run_comparison.html   ONE self-contained page (no internet): read fate and pattern charts, metrics table with
+                          a selectable baseline, top patterns, ONT bins, per-sample scatter of any two runs
 
 Python >= 3.8, standard library only.
 """
@@ -282,8 +282,8 @@ def write_samples_csv(path, runs):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("logs", nargs="+", help="utag.log files or folders holding them")
-    ap.add_argument("-o", "--out", default="run_comparison",
-                    help="output prefix: <out>.csv, <out>_samples.csv, <out>.html (default run_comparison)")
+    ap.add_argument("-o", "--outdir", default="compare_out",
+                    help="output folder for run_comparison.csv, samples.csv and run_comparison.html (default compare_out)")
     ap.add_argument("--labels", nargs="+", help="one name per run (default: the run folder names)")
     ap.add_argument("--baseline", help="run label the differences are taken against (default: the first run)")
     ap.add_argument("--title", default="utag run comparison", help="page title")
@@ -311,20 +311,21 @@ def main():
     if base not in labels:
         sys.exit(f"--baseline {base}: not one of {', '.join(labels)}")
 
-    out = re.sub(r"\.(html|csv)$", "", a.out)
-    d = os.path.dirname(out)
-    if d:
-        os.makedirs(d, exist_ok=True)
+    os.makedirs(a.outdir, exist_ok=True)
+    metrics_csv, samples_csv, page = (os.path.join(a.outdir, f) for f in
+                                      ("run_comparison.csv", "samples.csv", "run_comparison.html"))
     _, rows = rows_for_csv(runs, a.top)
-    write_csv(out + ".csv", labels, rows, base)
-    written = [out + ".csv"]
+    write_csv(metrics_csv, labels, rows, base)
+    written = [metrics_csv]
     n_samples = 0
     if any(r["samples"] is not None for r in runs):
-        n_samples = write_samples_csv(out + "_samples.csv", runs)
-        written.append(out + "_samples.csv")
-    with open(out + ".html", "w", encoding="utf-8") as fh:
+        n_samples = write_samples_csv(samples_csv, runs)
+        written.append(samples_csv)
+    elif os.path.exists(samples_csv):
+        os.remove(samples_csv)        # from an earlier comparison in this folder: it would not match these runs
+    with open(page, "w", encoding="utf-8") as fh:
         fh.write(render_html(runs, base, a.title, a.top, a.theme))
-    written.append(out + ".html")
+    written.append(page)
 
     w = max(len(l) for l in labels)
     for r in runs:

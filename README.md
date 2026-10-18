@@ -152,6 +152,8 @@ your samples. For samples given by their tags, `summary.tsv` also looks up their
 **Tags** (`--tags`): 96 tags of 9 nt (`U001`-`U096`), 5'->3' as in the oligo. Only tags used by the plate map / sample sheet go into
 the queries (`--all-tags` uses all). Every tag ID you reference must exist here. Check your setup with `tagqc`: tag edit distances, the plate map's layout per plate (which tags run along rows / columns),
 duplicate wells, missing tag sequences, and with `--samplesheet` the samples per plate, ONT bins and decoys.
+`tagqc --print columnwise|rowwise|plate` also prints every plate-map well with its tags: listed column by column (A1, B1, ..),
+row by row (A1, A2, ..), or drawn as a plate grid.
 
 **Plate map** (`--plates`): the full library design, 4 plates x 96 wells. Column 1-12 = rev tags `U001`-`U012`; rows A-H = fwd tags
 `U013`-`U020` on plate 1, `U021`-`U028` on plate 2, `U029`-`U036` on plate 3, `U037`-`U044` on plate 4 (so plate 2 well C7 = `U023` + `U007`).
@@ -283,4 +285,4 @@ two top patterns should be `Ftag ... Rtag(rc)` and `Rtag ... Ftag(rc)`) -> `filt
 | `data/fasta/` | Ready-made query FASTAs for the default primers |
 | `simulate-reads.py` | Fake reads with known truth: `python3 simulate-reads.py nbd 3000 sim.fastq` |
 | `plate-heatmap.py` | HTML heatmap of reads per well: `python3 plate-heatmap.py demux_out/summary.tsv -o plates.html` (samples are placed by the `plate`/`well` columns, so custom names need no extra file) |
-| `compare-runs.py` | Compare runs from their `utag.log`: `python3 compare-runs.py run1 run2 -o comparison` writes `comparison.csv` (metrics x runs, differences to `--baseline`), `comparison_samples.csv` (reads per sample, from each `summary.tsv`) and `comparison.html` (charts, metrics table, top patterns, ONT bins, per-sample scatter) |
+| `compare-runs.py` | Compare runs from their `utag.log`: `python3 compare-runs.py run1 run2 -o compare_out` writes into the folder `compare_out/` (the default): `run_comparison.csv` (metrics x runs, differences to `--baseline`), `samples.csv` (reads per sample, from each `summary.tsv`) and `run_comparison.html` (charts, metrics table, top patterns, ONT bins, per-sample scatter) |
