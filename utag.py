@@ -778,7 +778,8 @@ def pattern_kind(pat):
 
 
 def parse_patterns(path):
-    txt = open(path, errors="replace").read()
+    # barbell colours its output when CLICOLOR_FORCE is set (e.g. RStudio/Shiny), even into a file
+    txt = _ANSI_RE.sub("", open(path, errors="replace").read())
     m = re.search(r"Found (\d+) unique patterns", txt)
     pats = [(int(n), pt) for n, pt in re.findall(r"Pattern \d+: (\d+) occurrences\s*\n\s*(\S[^\n]*)", txt)]
     return (int(m.group(1)) if m else len(pats)), pats
