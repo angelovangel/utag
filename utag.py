@@ -857,6 +857,8 @@ def cmd_demux(a):
 
     ann_help, filt_help = help_text(barbell, "annotate"), help_text(barbell, "filter")
     trim_help = help_text(barbell, "trim")
+    if a.skip_trim and "--skip-trim" not in trim_help:     # fail before the long annotate step
+        sys.exit("--skip-trim: this barbell build has no 'barbell trim --skip-trim'; update barbell")
     multi = "--input <INPUT>..." in ann_help          # newer builds: space-separated, many inputs
     print_info(f"barbell CLI style: {'new (space-separated, multi-input)' if multi else 'release (comma-separated, single input)'}")
     merged = None
@@ -903,7 +905,7 @@ def cmd_demux(a):
         cmd += ["--dropped", os.path.join(bb, "dropped.tsv")]
     run(cmd, os.path.join(bb, "filter.log"))
 
-    print_step("[5/6] trim")
+    print_step("[5/6] trim" + (" (--skip-trim: reads are sorted, not trimmed)" if a.skip_trim else ""))
     tdir = os.path.join(bb, "trimmed")
     for f in glob.glob(os.path.join(tdir, "*")):
         os.remove(f)
@@ -920,6 +922,8 @@ def cmd_demux(a):
     gz_native = "--gzip" in trim_help
     if a.gzip and gz_native:
         cmd.append("--gzip")
+    if a.skip_trim:
+        cmd.append("--skip-trim")     # samples/ get whole reads: ONT adapter/barcode, utags and primers kept
     run(cmd, os.path.join(bb, "trim.log"))
     if merged and not a.keep_merged and os.path.exists(merged):
         os.remove(merged)
@@ -970,7 +974,7 @@ def cmd_demux(a):
             w = r["plate-well"]
             fh.write(f"{w}\t{r['plate']}\t{r['well']}\t{r['utag-fwd']}\t{r['utag-rev']}\t{counts.get(w, 0)}\n")
     with open(anno) as fh:
-        next(fh)
+        next(fh, None)            # empty when barbell found nothing (e.g. a near-empty ONT bin)
         n_ann = len({ln.split("\t", 1)[0] for ln in fh})
     n_total = sum(count_fastq_reads(f) for f in reads)
     tot = sum(counts.values())
@@ -1108,7 +1112,7 @@ def cmd_twopass(a):
                          ("--min-score-diff", a.min_score_diff)):
             if val is not None:
                 cmd += [opt, str(val)]
-        cmd += [x for x, on in (("--flip", not a.no_flip), ("--gzip", a.gzip),
+        cmd += [x for x, on in (("--flip", not a.no_flip), ("--gzip", a.gzip), ("--skip-trim", a.skip_trim),
                                 ("--no-decoys", a.no_decoys), ("--single-end", single)) if on]
         r = subprocess.run(cmd, capture_output=True, text=True, env={**os.environ, "NO_COLOR": "1"})
         if r.returncode:
@@ -1612,6 +1616,8 @@ def main():
     d.add_argument("--flip", dest="no_flip", action="store_false", default=True,
                    help="reverse-complement reads into forward-primer -> reverse-primer orientation")
     d.add_argument("--gzip", action="store_true")
+    d.add_argument("--skip-trim", action="store_true",
+                   help="write untrimmed reads to samples/ (ONT adapter/barcode, utags and primers kept; barbell trim --skip-trim)")
     d.set_defaults(fn=cmd_demux)
 
     t2 = sp.add_parser("twopass", epilog=INPUT_HELP, formatter_class=raw, help="barbell kit (ONT barcode) first, then utag demux inside each ONT bin")
@@ -1635,6 +1641,9 @@ def main():
     t2.add_argument("--flip", dest="no_flip", action="store_false", default=True,
                     help="reverse-complement reads into forward-primer -> reverse-primer orientation")
     t2.add_argument("--gzip", action="store_true")
+    t2.add_argument("--skip-trim", action="store_true",
+                    help="pass 2 does not trim: utags and primers stay on the reads in samples/ (pass 1, barbell kit, "
+                         "always removes the ONT adapter/barcode)")
     t2.set_defaults(fn=cmd_twopass)
 
     cx = sp.add_parser("context", epilog=INPUT_HELP, formatter_class=raw, help="find the real kit context: align the sequence upstream of the utags to the known adapters")

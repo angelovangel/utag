@@ -206,6 +206,8 @@ barbell/trimmed/U001__U013.trimmed.fastq   reverse-strand reads    -> both merge
 
 Pairs not in the plate map / sample sheet (e.g. `U001__U037`) are not merged; they are listed in `unexpected.tsv`.
 Reads keep their sequenced orientation; add `--flip` to reverse-complement reverse-strand reads (forward primer -> reverse primer).
+Reads are trimmed (ONT adapter/barcode, utags and primers removed); add `--skip-trim` to write whole, untrimmed reads to `samples/`
+(twopass: pass 1 still removes the ONT adapter/barcode, `--skip-trim` keeps the utags and primers).
 Once you have checked the results, `barbell/` can be deleted.
 
 ```
@@ -281,3 +283,4 @@ two top patterns should be `Ftag ... Rtag(rc)` and `Rtag ... Ftag(rc)`) -> `filt
 | `data/fasta/` | Ready-made query FASTAs for the default primers |
 | `simulate-reads.py` | Fake reads with known truth: `python3 simulate-reads.py nbd 3000 sim.fastq` |
 | `plate-heatmap.py` | HTML heatmap of reads per well: `python3 plate-heatmap.py demux_out/summary.tsv -o plates.html` (samples are placed by the `plate`/`well` columns, so custom names need no extra file) |
+| `compare-runs.py` | Compare runs from their `utag.log`: `python3 compare-runs.py run1 run2 -o comparison` writes `comparison.csv` (metrics x runs, differences to `--baseline`), `comparison_samples.csv` (reads per sample, from each `summary.tsv`) and `comparison.html` (charts, metrics table, top patterns, ONT bins, per-sample scatter) |
