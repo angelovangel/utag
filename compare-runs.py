@@ -23,7 +23,9 @@ Writes, into the output folder (-o, default compare_out/)
     run_comparison.csv    one row per metric, one column per run, then <run>_vs_<baseline> difference columns
     samples.csv           reads per sample and run (only when a summary.tsv was found)
     run_comparison.html   ONE self-contained page (no internet): read fate and pattern charts, metrics table with
-                          a selectable baseline, top patterns, ONT bins, per-sample scatter of any two runs
+                          a selectable baseline, top patterns, ONT bins, per-sample scatter of any two runs, and
+                          negative controls: mark empty wells (e.g. an unused plate) on the plate grids and read
+                          sensitivity / specificity per run (the selection stays in the browser; results download as CSV)
 
 Python >= 3.8, standard library only.
 """
@@ -153,21 +155,23 @@ def parse_log(path):
 
 
 def read_samples(log, subcommand, ignore_bins=False):
+    """({sample: reads}, {sample: [plate, well, utag_fwd, utag_rev]}) from the summary.tsv next to the log"""
     p = os.path.join(os.path.dirname(log), "summary.tsv")
     if not os.path.exists(p):
-        return None
-    out = {}
+        return None, {}
+    out, meta = {}, {}
     with open(p, newline="") as fh:
         for row in csv.DictReader(fh, delimiter="\t"):
             try:
                 n = int(row.get("reads") or 0)
             except ValueError:
                 continue
-            key = row.get("sample", "")
+            key, plate = row.get("sample", ""), row.get("plate", "")
             if subcommand == "twopass" and row.get("ont_barcode") and not ignore_bins:
-                key = f"{row['ont_barcode']}/{key}"
+                key, plate = f"{row['ont_barcode']}/{key}", f"{row['ont_barcode']}/{plate}"
             out[key] = out.get(key, 0) + n
-    return out
+            meta.setdefault(key, [plate, row.get("well", ""), row.get("utag_fwd", ""), row.get("utag_rev", "")])
+    return out, meta
 
 
 def find_logs(args):
@@ -305,7 +309,7 @@ def main():
     for p, l in zip(logs, labels):
         r = parse_log(p)
         r["label"] = l
-        r["samples"] = None if a.no_samples else read_samples(p, r["subcommand"], a.ignore_bins)
+        r["samples"], r["meta"] = (None, {}) if a.no_samples else read_samples(p, r["subcommand"], a.ignore_bins)
         runs.append(r)
     base = a.baseline or labels[0]
     if base not in labels:
@@ -342,8 +346,12 @@ def main():
 
 
 def render_html(runs, base, title, top, theme="light"):
+    meta = {}
+    for r in runs:
+        for k, v in r["meta"].items():
+            meta.setdefault(k, v)
     data = {
-        "base": base, "generated": time.strftime("%Y-%m-%d %H:%M"),
+        "base": base, "meta": meta, "generated": time.strftime("%Y-%m-%d %H:%M"),
         "foundLabels": FOUND_LABEL, "patterns": top_patterns(runs, top),
         "runs": [{**{k: r[k] for k in ("label", "log", "started", "cwd", "command", "subcommand", "context", "kit",
                                        "status", "steps", "warnings", "errors", "summary", "found", "patterns",
@@ -410,6 +418,23 @@ svg text{fill:var(--dim);font-size:11px}
 .cell{border-radius:4px;padding:1px 6px}
 details summary{cursor:pointer;color:var(--dim)}
 .hidden{display:none}
+.negbar{display:flex;gap:8px 14px;flex-wrap:wrap;align-items:center;margin-bottom:10px}
+.modes{display:inline-flex;gap:4px}.modes button.on{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.modes i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px;vertical-align:0}
+.plates{display:flex;flex-wrap:wrap;gap:14px;margin:6px 0 4px}
+.pl{min-width:0}.pl .pt{font-weight:600;font-size:12px;cursor:pointer;margin-bottom:3px;display:flex;gap:8px;align-items:baseline}
+.pl .pt small{color:var(--muted);font-weight:400}.pl .pt:hover{color:var(--s1)}
+.pg{display:grid;gap:2px;user-select:none;-webkit-user-select:none}
+.pg .h{font-size:9px;color:var(--muted);text-align:center;cursor:pointer;line-height:var(--cs)}.pg .h:hover{color:var(--ink)}
+.w{width:var(--cs);height:var(--cs);border-radius:3px;background:var(--q0);cursor:pointer;position:relative}
+.w.none{background:transparent;border:1px dashed var(--grid);cursor:default}
+.w.neg{box-shadow:0 0 0 2px var(--panel),0 0 0 3.5px var(--bad)}
+.w.neg::after{content:"";position:absolute;inset:30%;border-radius:50%;background:var(--panel)}
+.w.exc{opacity:.3;background-image:repeating-linear-gradient(45deg,transparent 0 2px,var(--panel) 2px 3.5px)}
+.w.pre{outline:2px solid var(--ink);outline-offset:0}
+.kpi td.b{font-weight:600}
+.note{color:var(--muted);font-size:11.5px;margin-top:6px;line-height:1.5}
+.lowlist button{padding:0 6px;font-size:11px}
 </style></head><body>
 <header><h1>__TITLE__</h1><div class="sub" id="sub"></div></header>
 <main>
@@ -438,6 +463,23 @@ details summary{cursor:pointer;color:var(--dim)}
       <div><div style="display:flex;gap:8px;margin-bottom:6px"><input id="q" placeholder="filter samples…" style="flex:1">
         <select id="sortBy"><option value="diff">sort: largest difference</option><option value="fc">sort: largest fold change</option><option value="x">sort: x reads</option><option value="y">sort: y reads</option><option value="name">sort: name</option></select></div>
         <div class="scroll" style="max-height:420px;overflow-y:auto"><table id="stab"></table></div></div></div></section>
+  <section class="panel hidden" id="negPanel"><h2>Negative controls<span class="ctl">
+      <label>colour wells by <select id="ncol"></select></label></span></h2>
+    <div class="negbar">
+      <span class="modes" id="nmodes">
+        <button data-m="neg" class="on"><i style="background:var(--bad)"></i>negative</button>
+        <button data-m="exc"><i style="background:var(--muted)"></i>exclude</button>
+        <button data-m="pos"><i style="background:var(--s1)"></i>positive</button></span>
+      <input id="nsel" placeholder="Plate4, *-H12, NB02/Plate4-* …" style="width:220px"><button id="nselGo">mark</button>
+      <button id="nclear">reset all to positive</button>
+      <label>call a well with ≥ <input id="ncut" type="number" min="1" value="10" style="width:64px"> reads</label>
+      <button id="ndl" style="margin-left:auto">download results CSV</button>
+    </div>
+    <div class="note" style="margin-top:0">Click or drag over wells, or click a plate name, row or column, to mark them with the active mode (click again to undo).
+      Negative = should have no reads (empty wells, an unused plate, NTCs). Excluded wells count nowhere (not loaded, known dropouts). All other wells are positives.</div>
+    <div class="plates" id="nplates"></div>
+    <div id="nres"></div>
+  </section>
   <section class="panel"><h2>Commands, timings and warnings</h2><div id="cmds"></div></section>
 </main>
 <div class="tip" id="tip"></div>
@@ -613,6 +655,195 @@ if (SR.length) {
   $("sortBy").onchange = $("q").oninput;
   drawSamples();
 }
+
+// ---- negative controls: wells marked in the page, analysed per run (selection kept in this browser only)
+if (SR.length) (() => {
+  $("negPanel").classList.remove("hidden");
+  const M = D.meta, keys = [...new Set(SR.flatMap(r => Object.keys(r.samples)))];
+  const SKEY = "compare-runs:neg:" + document.title + ":" + keys.length;
+  let st = {}; try { st = JSON.parse(localStorage.getItem(SKEY) || "{}") || {}; } catch (e) {}
+  const save = () => { try { localStorage.setItem(SKEY, JSON.stringify(st)); } catch (e) {} };
+  let mode = "neg";
+  const stateOf = k => st[k] || "pos";
+  // plates from the summary.tsv plate/well columns; samples without a well go into an "other" panel
+  const WRE = /^([A-Pa-p])0?(\d{1,2})$/, panels = new Map();
+  for (const k of keys) { const m = M[k] || [], pw = WRE.exec(m[1] || ""), pn = pw && m[0] ? m[0] : "other";
+    if (!panels.has(pn)) panels.set(pn, []);
+    panels.get(pn).push({k, r: pw ? pw[1].toUpperCase().charCodeAt(0) - 65 : -1, c: pw ? +pw[2] - 1 : -1}); }
+  const RAMP = ["#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b"].map(h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16)));
+  function ramp(t) { t = Math.max(0, Math.min(1, t)) * (RAMP.length - 1); const i = Math.min(RAMP.length - 2, Math.floor(t)), f = t - i;
+    return "rgb(" + RAMP[i].map((v, j) => Math.round(v + (RAMP[i + 1][j] - v) * f)).join(",") + ")"; }
+  $("ncol").innerHTML = SR.map((r, i) => `<option value="${i}">${esc(r.label)}</option>`).join("");
+  $("ncol").value = Math.max(0, SR.findIndex(r => r.label === D.base));
+
+  function drawPlates() {
+    let h = "";
+    [...panels.entries()].sort((a, b) => a[0] === "other" ? 1 : b[0] === "other" ? -1 : a[0].localeCompare(b[0], undefined, {numeric: true})).forEach(([pn, ws], pi) => {
+      const nr = pn === "other" ? 0 : Math.max(8, ...ws.map(w => w.r + 1)), nc = pn === "other" ? 0 : Math.max(12, ...ws.map(w => w.c + 1));
+      const cs = nc > 12 ? 11 : 16, nN = ws.filter(w => stateOf(w.k) === "neg").length, nE = ws.filter(w => stateOf(w.k) === "exc").length;
+      h += `<div class="pl" data-p="${pi}"><div class="pt" data-act="plate">${esc(pn)}<small>${nN ? nN + " neg" : ""}${nN && nE ? " · " : ""}${nE ? nE + " excl" : ""}</small></div>`;
+      if (pn === "other") { h += `<div class="pg" style="--cs:${cs}px;grid-template-columns:repeat(24,${cs}px)">` + ws.map(w => `<div class="w" data-k="${esc(w.k)}"></div>`).join("") + "</div></div>"; return; }
+      const at = new Map(ws.map(w => [w.r + "_" + w.c, w]));
+      h += `<div class="pg" style="--cs:${cs}px;grid-template-columns:12px repeat(${nc},${cs}px)"><div></div>`;
+      for (let c = 0; c < nc; c++) h += `<div class="h" data-act="col" data-c="${c}">${c + 1}</div>`;
+      for (let r = 0; r < nr; r++) { h += `<div class="h" data-act="row" data-r="${r}">${String.fromCharCode(65 + r)}</div>`;
+        for (let c = 0; c < nc; c++) { const w = at.get(r + "_" + c); h += w ? `<div class="w" data-k="${esc(w.k)}" data-r="${r}" data-c="${c}"></div>` : `<div class="w none"></div>`; } }
+      h += "</div></div>";
+    });
+    $("nplates").innerHTML = h; paint();
+  }
+  function paint() {
+    const run = SR[+$("ncol").value], mx = Math.max(1, ...Object.values(run.samples));
+    $("nplates").querySelectorAll(".w[data-k]").forEach(el => { const k = el.dataset.k, v = run.samples[k], s = stateOf(k);
+      el.style.background = v > 0 ? ramp(Math.log10(v + 1) / Math.log10(mx + 1)) : "";
+      el.classList.toggle("neg", s === "neg"); el.classList.toggle("exc", s === "exc"); });
+    $("nplates").querySelectorAll(".pl").forEach(pl => { const ks = [...pl.querySelectorAll(".w[data-k]")].map(e => e.dataset.k);
+      const nN = ks.filter(k => stateOf(k) === "neg").length, nE = ks.filter(k => stateOf(k) === "exc").length;
+      pl.querySelector(".pt small").textContent = (nN ? nN + " neg" : "") + (nN && nE ? " · " : "") + (nE ? nE + " excl" : ""); });
+  }
+  function apply(ks, toggle) {             // all already in the active mode + toggle -> back to positive
+    const m = toggle && ks.length && ks.every(k => stateOf(k) === mode) ? "pos" : mode;
+    for (const k of ks) { if (m === "pos") delete st[k]; else st[k] = m; }
+    save(); paint(); analyse();
+  }
+  // mouse: click a well, drag a box inside one plate, or click a plate name / row / column header
+  let drag = null;
+  const box = (pl, a, b) => [...pl.querySelectorAll(".w[data-k]")].filter(e => e.dataset.r !== undefined &&
+    +e.dataset.r >= Math.min(a.r, b.r) && +e.dataset.r <= Math.max(a.r, b.r) && +e.dataset.c >= Math.min(a.c, b.c) && +e.dataset.c <= Math.max(a.c, b.c));
+  $("nplates").addEventListener("mousedown", e => { const w = e.target.closest(".w[data-k]"); if (!w) return; e.preventDefault();
+    drag = {pl: w.closest(".pl"), a: {r: +w.dataset.r, c: +w.dataset.c}, b: {r: +w.dataset.r, c: +w.dataset.c}, el: w}; });
+  $("nplates").addEventListener("mouseover", e => { const w = e.target.closest(".w[data-k]");
+    if (w) { const k = w.dataset.k, m = M[k] || [];
+      showTip(e, `<b>${esc(k)}</b> <span class="t">${esc(stateOf(k) === "pos" ? "positive" : stateOf(k) === "neg" ? "negative" : "excluded")}</span>` +
+        (m[2] || m[3] ? `<br><span class="t">utags</span> ${esc(m[2])} / ${esc(m[3])}` : "") +
+        SR.map(r => `<br><span class="t">${esc(r.label)}</span> ${fmt(r.samples[k])}`).join("")); } else hideTip();
+    if (!drag || !w || w.closest(".pl") !== drag.pl || w.dataset.r === undefined) return;
+    drag.b = {r: +w.dataset.r, c: +w.dataset.c};
+    drag.pl.querySelectorAll(".w.pre").forEach(x => x.classList.remove("pre")); box(drag.pl, drag.a, drag.b).forEach(x => x.classList.add("pre")); });
+  $("nplates").addEventListener("mouseleave", hideTip);
+  document.addEventListener("mouseup", () => { if (!drag) return; const d = drag; drag = null;
+    d.pl.querySelectorAll(".w.pre").forEach(x => x.classList.remove("pre"));
+    const ks = d.el.dataset.r === undefined ? [d.el.dataset.k] : box(d.pl, d.a, d.b).map(x => x.dataset.k);
+    apply(ks, true); });
+  $("nplates").addEventListener("click", e => { const h = e.target.closest("[data-act]"); if (!h) return; const pl = h.closest(".pl");
+    const ws = [...pl.querySelectorAll(".w[data-k]")].filter(x => h.dataset.act === "plate" || (h.dataset.act === "row" ? x.dataset.r === h.dataset.r : x.dataset.c === h.dataset.c));
+    apply(ws.map(x => x.dataset.k), true); });
+  $("nmodes").addEventListener("click", e => { const b = e.target.closest("button"); if (!b) return; mode = b.dataset.m;
+    $("nmodes").querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b)); });
+  // selectors: sample names or plate names, * and ? wildcards, case-insensitive
+  const glob = g => new RegExp("^" + g.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".") + "$", "i");
+  $("nselGo").onclick = () => { const res = $("nsel").value.split(/[\s,;]+/).filter(Boolean).map(glob);
+    const ks = keys.filter(k => res.some(re => re.test(k) || re.test((M[k] || [])[0] || ""))); apply(ks, false); };
+  $("nsel").addEventListener("keydown", e => { if (e.key === "Enter") $("nselGo").onclick(); });
+  $("nclear").onclick = () => { st = {}; save(); paint(); analyse(); };
+  $("ncol").onchange = paint;
+  $("ncut").oninput = () => analyse();
+
+  // ---- statistics
+  function auc(pos, neg) {                // Mann-Whitney: P(positive well > negative well), ties count half
+    const all = pos.map(v => [v, 1]).concat(neg.map(v => [v, 0])).sort((a, b) => a[0] - b[0]);
+    let rs = 0;
+    for (let i = 0; i < all.length;) { let j = i; while (j < all.length && all[j][0] === all[i][0]) j++;
+      const rank = (i + 1 + j) / 2; for (let k = i; k < j; k++) if (all[k][1]) rs += rank; i = j; }
+    return (rs - pos.length * (pos.length + 1) / 2) / (pos.length * neg.length);
+  }
+  const callAt = (pos, neg, t) => { const tp = pos.filter(v => v >= t).length, fp = neg.filter(v => v >= t).length;
+    return {t, tp, fn: pos.length - tp, fp, tn: neg.length - fp, sens: tp / pos.length, spec: 1 - fp / neg.length}; };
+  function stats(run, cut) {
+    const ks = keys.filter(k => run.samples[k] !== undefined);
+    const pos = ks.filter(k => stateOf(k) === "pos").map(k => run.samples[k]), neg = ks.filter(k => stateOf(k) === "neg").map(k => run.samples[k]);
+    if (!pos.length || !neg.length) return null;
+    const total = ks.reduce((a, k) => a + run.samples[k], 0), negReads = neg.reduce((a, b) => a + b, 0), maxNeg = Math.max(...neg);
+    const cands = [...new Set([1, maxNeg + 1, ...pos, ...neg].filter(v => v >= 1))].sort((a, b) => a - b);
+    let best = null; for (const t of cands) { const c = callAt(pos, neg, t); if (!best || c.sens + c.spec > best.sens + best.spec) best = c; }
+    return {pos, neg, total, negReads, maxNeg, auc: auc(pos, neg), clean: callAt(pos, neg, maxNeg + 1), best, at: callAt(pos, neg, cut)};
+  }
+  // what the negatives can detect, from their utags: tags not used by any positive well catch misreads of that tag only
+  function controlKind() {
+    const pk = keys.filter(k => stateOf(k) === "pos"), nk = keys.filter(k => stateOf(k) === "neg");
+    const uf = new Set(pk.map(k => (M[k] || [])[2]).filter(Boolean)), ur = new Set(pk.map(k => (M[k] || [])[3]).filter(Boolean));
+    if (!nk.length || !uf.size) return null;
+    const freeF = nk.filter(k => !uf.has((M[k] || [])[2])), freeR = nk.filter(k => !ur.has((M[k] || [])[3]));
+    const kind = freeF.length === nk.length && !freeR.length ? "fwd" : freeR.length === nk.length && !freeF.length ? "rev"
+      : !freeF.length && !freeR.length ? "blank" : "mixed";
+    const kF = new Set(freeF.map(k => M[k][2])).size, kR = new Set(freeR.map(k => M[k][3])).size;
+    return {kind, factor: kind === "fwd" ? (uf.size - 1 + kF) / kF : kind === "rev" ? (ur.size - 1 + kR) / kR : null,
+      k: kind === "fwd" ? kF : kR, m: kind === "fwd" ? uf.size : ur.size};
+  }
+  let lastRows = [];
+  function analyse() {
+    const cut = Math.max(1, +$("ncut").value || 1), S = SR.map(r => stats(r, cut)), ck = controlKind();
+    const nN = keys.filter(k => stateOf(k) === "neg").length, nE = keys.filter(k => stateOf(k) === "exc").length;
+    if (!nN) { $("nres").innerHTML = `<div class="note">Mark at least one negative well above to see sensitivity and specificity.</div>`; lastRows = []; return; }
+    const pp = v => v === null || v === undefined ? "–" : (100 * v).toFixed(1) + "%";
+    const rows = [
+      ["positive wells", s => fmt(s.pos.length)], ["negative wells", s => fmt(s.neg.length)],
+      ["AUC (positive well > negative well)", s => s.auc.toFixed(4), true],
+      ["reads in negative wells", s => fmt(s.negReads)],
+      ["… per million assigned reads", s => fmt(Math.round(1e6 * s.negReads / s.total))],
+      ["max reads in one negative well", s => fmt(s.maxNeg), true],
+      [`at ≥ ${cut} reads: sensitivity`, s => pp(s.at.sens), true], [`at ≥ ${cut} reads: specificity`, s => pp(s.at.spec), true],
+      [`at ≥ ${cut} reads: TP / FN / TN / FP`, s => `${s.at.tp} / ${s.at.fn} / ${s.at.tn} / ${s.at.fp}`],
+      ["cutoff for 100% specificity", s => "≥ " + fmt(s.clean.t)], ["… sensitivity there", s => pp(s.clean.sens), true],
+      ["best cutoff (Youden)", s => "≥ " + fmt(s.best.t)], ["… sensitivity / specificity", s => pp(s.best.sens) + " / " + pp(s.best.spec)],
+    ];
+    if (ck && ck.factor) rows.push([`est. all ${ck.kind}-tag misassignment (× ${ck.factor.toFixed(2)})`, s => (100 * s.negReads * ck.factor / s.total).toFixed(3) + "%"]);
+    lastRows = [["metric", ...SR.map(r => r.label)], ...rows.map(([n, f]) => [n, ...S.map(s => s ? f(s).replace(/^≥ /, ">=") : "")])];
+    let h = `<div class="scroll"><table class="kpi"><tr><th>metric</th>${SR.map(r => `<th>${esc(r.label)}</th>`).join("")}</tr>` +
+      rows.map(([n, f, b]) => `<tr><td>${esc(n)}</td>${S.map(s => `<td class="${b ? "b" : ""}">${s ? f(s) : '<span class="neu">–</span>'}</td>`).join("")}</tr>`).join("") + "</table></div>";
+    const kindTxt = !ck ? "" : ck.kind === "fwd" || ck.kind === "rev"
+      ? `Negatives use ${ck.k} ${ck.kind} utag(s) that no positive well uses: they catch misreads of the ${ck.kind} tag only, so specificity here is a lower bound (${ck.kind === "fwd" ? "rev" : "fwd"}-tag errors land in positive wells unseen). Estimate: a misread of one of the ${ck.m} used tags lands on an unused one in ${ck.k}/${ck.m - 1 + ck.k} of cases.`
+      : ck.kind === "blank" ? "Negatives use utags that positive wells use too (in-design blanks): they catch errors on either tag and physical contamination."
+      : "Negatives mix unused-tag wells and in-design blanks; no misassignment estimate.";
+    h += `<div class="note">${nN} negative, ${nE} excluded, ${keys.length - nN - nE} positive wells. ${kindTxt} Wells with 0 reads are not called at any cutoff.</div>`;
+    h += `<div class="two" style="margin-top:12px"><div><div class="legend"><span><i style="background:var(--s1)"></i>positive wells</span><span><i style="background:var(--s2)"></i>negative wells</span><span style="color:var(--muted)">│ cutoff</span></div><div id="nstrip"></div></div><div id="ntags"></div></div>`;
+    h += `<div id="nlow" style="margin-top:12px"></div>`;
+    $("nres").innerHTML = h;
+    strip(S, cut); tags(); low(cut);
+  }
+  function strip(S, cut) {                // reads per well, one row per run, log scale
+    const lw = Math.min(150, 12 + 7 * Math.max(...SR.map(r => r.label.length))), W = 620, rh = 44, H = SR.length * rh + 30, pw = W - lw - 16;
+    const mx = Math.max(10, ...SR.flatMap(r => Object.values(r.samples))), x = v => lw + pw * Math.log10(v + 1) / Math.log10(mx + 1);
+    let svg = `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="reads per well, positives and negatives">`;
+    for (const t of [0, 1, 10, 100, 1e3, 1e4, 1e5].filter(t => t <= mx)) svg += `<line x1="${x(t)}" x2="${x(t)}" y1="0" y2="${H - 18}" stroke="var(--grid)"/><text x="${x(t)}" y="${H - 5}" text-anchor="middle">${fmt(t)}</text>`;
+    let pts = [];
+    SR.forEach((r, i) => { const y0 = i * rh + 6;
+      svg += `<text x="${lw - 8}" y="${y0 + 18}" text-anchor="end" style="fill:var(--ink)">${esc(r.label.length > 20 ? "…" + r.label.slice(-19) : r.label)}</text>`;
+      keys.forEach((k, j) => { const s = stateOf(k), v = r.samples[k]; if (s === "exc" || v === undefined) return;
+        const jit = ((j * 2654435761) % 1000) / 1000, y = y0 + (s === "neg" ? 22 + jit * 10 : 2 + jit * 16);
+        pts.push(`<circle cx="${x(v).toFixed(1)}" cy="${y.toFixed(1)}" r="${s === "neg" ? 3.5 : 2.5}" fill="var(${s === "neg" ? "--s2" : "--s1"})" fill-opacity="${s === "neg" ? .9 : .5}" data-h="${esc(`<b>${esc(k)}</b><br><span class="t">${esc(r.label)}</span> ${fmt(v)} reads · ${s === "neg" ? "negative" : "positive"}`)}"/>`); }); });
+    svg += pts.join("") + `<line x1="${x(cut - .5)}" x2="${x(cut - .5)}" y1="0" y2="${H - 18}" stroke="var(--ink)" stroke-width="1.5" stroke-dasharray="3 3"/>`;
+    $("nstrip").innerHTML = svg + "</svg>";
+    $("nstrip").querySelectorAll("circle").forEach(n => { n.addEventListener("mousemove", e => showTip(e, n.dataset.h)); n.addEventListener("mouseleave", hideTip); });
+  }
+  function tags() {                       // which utags collect the reads in negative wells
+    const nk = keys.filter(k => stateOf(k) === "neg"), acc = new Map();
+    for (const k of nk) { const m = M[k] || []; for (const [side, t] of [["fwd", m[2]], ["rev", m[3]]]) { if (!t) continue;
+      const id = side + " " + t; if (!acc.has(id)) acc.set(id, SR.map(() => 0)); SR.forEach((r, i) => acc.get(id)[i] += r.samples[k] || 0); } }
+    const rows = [...acc.entries()].sort((a, b) => b[1].reduce((x, y) => x + y, 0) - a[1].reduce((x, y) => x + y, 0)).slice(0, 12);
+    $("ntags").innerHTML = rows.length ? `<div class="note" style="margin:0 0 4px">reads in negative wells per utag (top ${rows.length})</div><div class="scroll" style="max-height:300px;overflow-y:auto"><table><tr><th>utag</th>${SR.map(r => `<th>${esc(r.label)}</th>`).join("")}</tr>` +
+      rows.map(([id, v]) => `<tr><td>${esc(id)}</td>${v.map(n => `<td>${fmt(n)}</td>`).join("")}</tr>`).join("") + "</table></div>" : "";
+  }
+  function low(cut) {                     // positives below the cutoff in every run: likely real dropouts
+    const ks = keys.filter(k => stateOf(k) === "pos" && SR.every(r => r.samples[k] === undefined || r.samples[k] < cut));
+    if (!ks.length) { $("nlow").innerHTML = ""; return; }
+    $("nlow").innerHTML = `<div class="note" style="margin:0 0 4px">${ks.length} positive well(s) below ${cut} reads in every run: more likely failed samples than demux misses.
+      <button id="nlowAll">exclude all</button></div><div class="scroll lowlist" style="max-height:220px;overflow-y:auto"><table><tr><th>sample</th>${SR.map(r => `<th>${esc(r.label)}</th>`).join("")}<th></th></tr>` +
+      ks.slice(0, 200).map(k => `<tr><td>${esc(k)}</td>${SR.map(r => `<td>${fmt(r.samples[k])}</td>`).join("")}<td><button data-x="${esc(k)}">exclude</button></td></tr>`).join("") + "</table></div>";
+    $("nlowAll").onclick = () => { ks.forEach(k => st[k] = "exc"); save(); paint(); analyse(); };
+    $("nlow").querySelectorAll("button[data-x]").forEach(b => b.onclick = () => { st[b.dataset.x] = "exc"; save(); paint(); analyse(); });
+  }
+  $("ndl").onclick = () => {
+    const q = v => /[",\n]/.test(v) ? '"' + String(v).replace(/"/g, '""') + '"' : v;
+    const lines = lastRows.map(r => r.map(q).join(","));
+    lines.push("", "sample,state");
+    for (const k of keys) if (stateOf(k) !== "pos") lines.push(q(k) + "," + (stateOf(k) === "neg" ? "negative" : "excluded"));
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([lines.join("\n") + "\n"], {type: "text/csv"}));
+    a.download = "negative_controls.csv"; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  };
+  drawPlates(); analyse();
+})();
 
 // ---- commands
 $("cmds").innerHTML = R.map(r => `<details ${r.status !== "ok" ? "open" : ""} style="margin-bottom:8px"><summary><b style="color:var(--ink)">${esc(r.label)}</b><span class="badge ${r.status}">${r.status}</span> · ${esc(r.log)}</summary>
