@@ -370,15 +370,15 @@ HTML = r"""<!doctype html>
 :root{color-scheme:light;--bg:#f9f9f7;--panel:#fcfcfb;--panel2:#f1f0ec;--ink:#0b0b0b;--dim:#52514e;--muted:#898781;
   --grid:#e1e0d9;--axis:#c3c2b7;--ring:rgba(11,11,11,.10);
   --s1:#2a78d6;--s2:#eb6834;--s3:#1baf7a;--s4:#eda100;--good:#006300;--bad:#d03b3b;
-  --q0:#f1f0ec;--q1:#cde2fb;--q2:#9ec5f4;--q3:#6da7ec;--q4:#3987e5;--q5:#256abf}
+  --q0:#f1f0ec;--q1:#cde2fb;--q2:#9ec5f4;--q3:#6da7ec;--q4:#3987e5;--q5:#256abf;--hbg:#e7eef8;--hink:#1c3d66}
 @media (prefers-color-scheme:dark){:root:where(:not([data-theme="light"])){color-scheme:dark;--bg:#0d0d0d;--panel:#1a1a19;
   --panel2:#252523;--ink:#f0efec;--dim:#c3c2b7;--muted:#898781;--grid:#2c2c2a;--axis:#383835;--ring:rgba(255,255,255,.10);
   --s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500;--good:#0ca30c;--bad:#e66767;
-  --q0:#252523;--q1:#0d366b;--q2:#104281;--q3:#184f95;--q4:#1c5cab;--q5:#256abf}}
+  --q0:#252523;--q1:#0d366b;--q2:#104281;--q3:#184f95;--q4:#1c5cab;--q5:#256abf;--hbg:#1c2a3d;--hink:#b7cdea}}
 :root[data-theme="dark"]{color-scheme:dark;--bg:#0d0d0d;--panel:#1a1a19;--panel2:#252523;--ink:#f0efec;--dim:#c3c2b7;
   --muted:#898781;--grid:#2c2c2a;--axis:#383835;--ring:rgba(255,255,255,.10);
   --s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500;--good:#0ca30c;--bad:#e66767;
-  --q0:#252523;--q1:#0d366b;--q2:#104281;--q3:#184f95;--q4:#1c5cab;--q5:#256abf}
+  --q0:#252523;--q1:#0d366b;--q2:#104281;--q3:#184f95;--q4:#1c5cab;--q5:#256abf;--hbg:#1c2a3d;--hink:#b7cdea}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--ink);font:13px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
 header{padding:18px 24px 12px;border-bottom:1px solid var(--grid)}
@@ -386,7 +386,8 @@ h1{margin:0;font-size:19px;font-weight:650}
 .sub{color:var(--dim);font-size:12px;margin-top:2px}
 main{max-width:1280px;margin:0 auto;padding:16px 24px 48px;display:grid;gap:16px}
 .panel{background:var(--panel);border:1px solid var(--ring);border-radius:12px;padding:14px 16px 16px;min-width:0}
-h2{margin:0 0 10px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--dim);font-weight:600;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+h2{margin:-14px -16px 12px;padding:8px 16px;min-height:38px;background:var(--hbg);border-bottom:1px solid var(--ring);border-radius:12px 12px 0 0;
+  font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--hink);font-weight:650;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
 h2 .ctl{margin-left:auto;text-transform:none;letter-spacing:0;font-weight:400;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
 select,input,button{font:inherit;color:var(--ink);background:var(--panel2);border:1px solid var(--ring);border-radius:6px;padding:3px 8px}
 label{color:var(--dim);display:inline-flex;gap:5px;align-items:center}

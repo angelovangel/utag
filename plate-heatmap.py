@@ -216,7 +216,7 @@ main{grid-area:main;overflow:auto;padding:16px 20px 40px}
 .hc,.hr{display:flex;align-items:center;justify-content:center;color:var(--dim);font-size:11px;cursor:pointer;border-radius:4px;min-height:1.4em}
 .hc:hover,.hr:hover{background:var(--panel2);color:var(--ink)}
 .well{position:relative;aspect-ratio:1;border-radius:2px;display:flex;align-items:center;justify-content:center;text-align:center;
-  font-size:clamp(6.5px,calc(100cqw / (var(--cols) + 1.7) * .27),15px);font-weight:600;cursor:pointer;line-height:1;overflow:visible;
+  font-size:clamp(6.5px,calc(100cqw / (var(--cols) + 1.7) * .27),15px);font-weight:800;cursor:pointer;line-height:1;overflow:visible;
   font-variant-numeric:tabular-nums;transition:box-shadow .08s}
 .well.empty{background:transparent;border:1px dashed var(--line);cursor:default}
 .well:not(.empty):hover{box-shadow:0 0 0 2px #1c223088}

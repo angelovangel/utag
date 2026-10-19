@@ -239,14 +239,15 @@ twopass_out/
 * **Mostly primer-flank only / few hits:** wrong primers or wrong context.
 * **Other primers** (ITS, COI, 18S, ...): give both 5'->3' as ordered, IUPAC allowed: `--primer-f <SEQ> --primer-r <SEQ>`
   (`demux`, `twopass`, `queries`, `context`). The primer is part of the flank and is trimmed from the output.
-* **Wrong context:** `context` finds exact utag + primer matches and aligns the sequence upstream (indels allowed) to the
+* **Wrong context:** `context` finds utag + primer hits (primer within 250 nt of a read end with <= 2 edits, utag <= 2 edits
+  right before it; `--exact` for error-free utag + 10 nt of primer) and aligns the sequence upstream (indels allowed) to the
   known adapters (LSK Ligation Adapter, NB rear, MAB TOPO site), separately for read starts and read ends. It reports how
   much of each adapter is there (% within k edits), which `-c` context fits, the NB/AB barcodes for NBD/MAB, and the command
   to use. A per-position consensus is printed too, for unknown kits. On real LSK reads the whole adapter is at the read start,
   but the read end stops inside it (only the last ~6 nt), which is due to how ONT works (there is some distance between the motor and the reader).
 
   ```bash
-  utag context -r reads.fastq.gz
+  utag context -r reads.fastq.gz                           # also writes context_report.html (--html FILE to rename, --html '' to skip)
   utag demux -r reads.fastq.gz -c <suggested context> ...   # or -c bare --prefix <seq> for unknown kits
   ```
 * Tuning: `--flank-max-errors N` (relax if reads are missed), `--min-score-diff X` (raise, e.g. 0.2, for fewer wrong-well calls),

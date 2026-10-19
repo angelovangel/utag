@@ -38,7 +38,7 @@ input file formats (defaults live in data/ next to this script):
   are reported as unexpected (--no-decoys turns that off).
   ont-barcode (e.g. NB01) is only used by twopass. See README "Input files".
 """
-import argparse, csv, glob, gzip, itertools, os, re, resource, shutil
+import argparse, csv, glob, gzip, itertools, json, os, random, re, resource, shutil
 import subprocess, sys, time
 from collections import Counter, defaultdict
 
@@ -1204,6 +1204,44 @@ def suffix_edits(adapter, up):
     return d
 
 
+HIT_PRIMER_NT, HIT_EDITS = 18, 2       # context hit: primer start (<= 2 edits) + utag (<= 2 edits) right before it
+IUPAC_SET = {k: set(v.strip("[]")) for k, v in IUPAC_RE.items()}
+
+
+def primer_start(p, text, k):
+    """(start, edits) of the whole primer p (IUPAC) in text within k edits, or None. DP on the reversed strings:
+    the primer end is free, so the best row-end gives where it starts."""
+    q, t = p[::-1], text[::-1]
+    prev = [0] * (len(t) + 1)
+    for i, a in enumerate(q, 1):
+        ok, cur = IUPAC_SET.get(a, {a}), [i]
+        for j, b in enumerate(t, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (b not in ok)))
+        prev = cur
+    e = min(prev)
+    return (len(t) - prev.index(e), e) if e <= k else None
+
+
+def tag_before(tag, region):
+    """(edits, read bases used) for tag aligned so that it ends where region ends (indels allowed)"""
+    q, t = tag[::-1], region[::-1]
+    row = list(range(len(t) + 1))
+    for x in q:
+        new = [row[0] + 1]
+        for j, y in enumerate(t, 1):
+            new.append(min(row[j] + 1, new[j - 1] + 1, row[j - 1] + (x != y)))
+        row = new
+    e = min(row)
+    return e, row.index(e)
+
+
+def primer_seeds(p):
+    """the primer's first HIT_PRIMER_NT nt in 3 pieces: with <= 2 edits one piece is exact (pigeonhole)"""
+    p = p.upper()[:HIT_PRIMER_NT]
+    b = [0, len(p) // 3, 2 * len(p) // 3, len(p)]
+    return p, [(re.compile("".join(IUPAC_RE[c] for c in p[b[i]:b[i + 1]])), b[i]) for i in range(3)]
+
+
 # known sequence directly 5' of the utag: (context, name, sequence, -c query length)
 KNOWN_CONTEXTS = [("lsk", "Ligation Adapter (SQK-LSK114)", LSK_ADAPTER, len(LSK_ADAPTER_TAIL)),
                   ("nbd", "NB rear (SQK-NBD114)", NB_REAR, len(NB_REAR)),
@@ -1242,41 +1280,106 @@ def cmd_context(a):
     ups = {"start": [], "end": []}           # utag + primer read 5'->3' on the read (start) or on its rc (end)
     sides = {"start": Counter(), "end": Counter()}
     with_hit = Counter()                     # reads with >= 1 hit: "start", "end", "any"
-    seen = 0
-    for path in reads:
+    def scan_exact(where, x):
+        for side, ids, pat in (("fwd", fwd, pf), ("rev", rev, pr)):
+            for t in ids:
+                tg = tags[t]
+                i = x.find(tg)
+                while i >= 0:
+                    if pat.match(x, i + len(tg)):
+                        ups[where].append(x[max(0, i - U):i].rjust(U, "-"))
+                        sides[where][side] += 1
+                    i = x.find(tg, i + 1)
+
+    K, TL = HIT_EDITS, max(len(tags[t]) for t in fwd + rev)
+    seeds = (("fwd", [tags[t] for t in fwd], *primer_seeds(a.primer_f or PRIMER_F)),
+             ("rev", [tags[t] for t in rev], *primer_seeds(a.primer_r or PRIMER_R)))
+
+    def scan_relaxed(where, x):
+        """one hit per read end: the primer within --max-offset of the read end, the utag right before it"""
+        w, best = x[:a.max_offset + TL + HIT_PRIMER_NT + K], None
+        for side, tg, ps, pieces in seeds:
+            tried = []
+            for c in sorted({m.start() - off for rx, off in pieces for m in rx.finditer(w)}):
+                if c < 6 or any(abs(c - d) <= K for d in tried):
+                    continue
+                tried.append(c)
+                lo = c - K
+                hit = primer_start(ps, w[lo:c + len(ps) + K], K)
+                if not hit:
+                    continue
+                st, pe = lo + hit[0], hit[1]
+                region = w[max(0, st - TL - 3):st]
+                ex = next((t for t in tg if region.endswith(t)), None)
+                te, used = (0, len(ex)) if ex else min(tag_before(t, region) for t in tg)
+                if te <= K and (best is None or pe + te < best[0]):
+                    best = (pe + te, side, st - used)
+        if best:
+            ups[where].append(x[max(0, best[2] - U):best[2]].rjust(U, "-"))
+            sides[where][best[1]] += 1
+
+    def scan(seq):
+        before = {w: len(ups[w]) for w in ups}
+        for where, x in (("start", seq), ("end", rc(seq))):
+            (scan_exact if a.exact else scan_relaxed)(where, x)
+        got = [w for w in ups if len(ups[w]) > before[w]]
+        with_hit.update(got + (["any"] if got else []) + (["both"] if len(got) == 2 else []))
+
+    def read_from(path, skip, take):
+        """scan reads skip+1 .. skip+take of a file; returns (reads scanned, file ended)"""
         op = gzip.open if path.endswith(".gz") else open
+        n = 0
         with op(path, "rt") as fh:
-            while seen < a.n_reads:
-                h = fh.readline()
-                if not h:
-                    break
+            for _ in range(4 * skip):
+                if not fh.readline():
+                    return 0, True
+            while n < take:
+                if not fh.readline():
+                    return n, True
                 seq = fh.readline().strip().upper()
                 fh.readline(); fh.readline()
-                seen += 1
-                before = {w: len(ups[w]) for w in ups}
-                for where, x in (("start", seq), ("end", rc(seq))):
-                    for side, ids, pat in (("fwd", fwd, pf), ("rev", rev, pr)):
-                        for t in ids:
-                            tg = tags[t]
-                            i = x.find(tg)
-                            while i >= 0:
-                                if pat.match(x, i + len(tg)):
-                                    ups[where].append(x[max(0, i - U):i].rjust(U, "-"))
-                                    sides[where][side] += 1
-                                i = x.find(tg, i + 1)
-                got = [w for w in ups if len(ups[w]) > before[w]]
-                with_hit.update(got + (["any"] if got else []))
-        if seen >= a.n_reads:
-            break
+                scan(seq)
+                n += 1
+        return n, False
+
+    # spread -n over all files (fastq_pass/ = every barcode folder and unclassified), not the first files in path
+    # order; files that run out leave their share to the others in the next round
+    done, live, seen = [0] * len(reads), list(range(len(reads))), 0
+    while seen < a.n_reads and live:
+        quota, keep = -(-(a.n_reads - seen) // len(live)), []
+        for i in live:
+            take = min(quota, a.n_reads - seen)
+            if take <= 0:
+                keep.append(i)
+                continue
+            n, ended = read_from(reads[i], done[i], take)
+            done[i] += n
+            seen += n
+            if not ended:
+                keep.append(i)
+        live = keep
+    n_used = sum(1 for d in done if d)
+    rnd = random.Random(1)                   # hits in file order -> the --n-align / barcode subsets would come from
+    for w in ups:                            # the first files again; shuffle (fixed seed: same result every run)
+        rnd.shuffle(ups[w])
+    hit_rule = ("exact match of utag + first 10 nt of the primer, anywhere in the read (--exact)" if a.exact else
+                f"primer (first {HIT_PRIMER_NT} nt, <= {HIT_EDITS} edits) within {a.max_offset} nt of a read end, "
+                f"utag (<= {HIT_EDITS} edits) right before it")
+    R = {"hit_rule": hit_rule, "command": " ".join(sys.argv), "started": time.strftime("%Y-%m-%d %H:%M"), "cwd": os.getcwd(),
+         "reads": [rel(f) for f in reads[:5]], "n_files": len(reads), "files_used": n_used, "scanned": seen, "with_hit": dict(with_hit),
+         "n_align": a.n_align, "upstream": U, "min_support": a.min_support, "tags": rel(a.tags),
+         "primer_f": a.primer_f or PRIMER_F, "primer_r": a.primer_r or PRIMER_R,
+         "known": [{"ctx": c, "name": nm, "seq": sq, "qlen": ql} for c, nm, sq, ql in KNOWN_CONTEXTS], "ends": {}}
     print_step("context: sequence upstream of the utags")
-    print_info(f"scanned {fmt_int(seen)} reads; a hit = an exact match of utag + first 10 nt of the primer")
+    print_info(f"scanned {fmt_int(seen)} reads from {fmt_int(n_used)} of {fmt_int(len(reads))} files "
+               f"(up to {fmt_int(-(-a.n_reads // max(1, len(reads))))} per file); hit = {hit_rule}")
     print(style("    read start: the hit is in the read as sequenced, so the adapter before the utag is the start of the read\n"
                 "    read end:   the hit is in the reverse complement of the read, so the utag is near the end of the read;\n"
                 "                the adapter after it is shown reverse-complemented, in the same orientation as at the start", "gray"))
     print_info(f"reads with a hit: {fmt_int(with_hit['any'])} ({100 * with_hit['any'] / max(1, seen):.0f}%); "
-               f"at the read start {fmt_int(with_hit['start'])}, at the read end {fmt_int(with_hit['end'])}")
-    print(style("    hits need ~20 error-free bases (utag + 10 nt of primer), so ~50% of reads is normal at Q15 near the "
-                "read start; demux allows errors and assigns more", "gray"))
+               f"at the read start {fmt_int(with_hit['start'])}, at the read end {fmt_int(with_hit['end'])}, at both {fmt_int(with_hit['both'])}")
+    if a.exact:
+        print(style("    exact hits need ~20 error-free bases; at Q15 near the read start many reads have an error there", "gray"))
     print_info(f"the sequence before each hit is aligned (indels allowed) to the known adapters, ending at the utag; "
                f"all % below are of the first {fmt_int(a.n_align)} hits at that read end")
     dists = {}                   # where -> context -> [suffix_edits per hit]
@@ -1284,12 +1387,15 @@ def cmd_context(a):
                          ("end", "read end  (utag near the 3' end of the read, shown reverse-complemented)")):
         L = ups[where]
         n_side = ", ".join(f"{k} {fmt_int(v)}" for k, v in sorted(sides[where].items()))
+        E = R["ends"][where] = {"hits": len(L), "sides": dict(sides[where])}
         print(f"\n  {style(label, 'bold')}  {style(fmt_int(len(L)) + ' hits', 'green' if len(L) >= 10 else 'red')}"
               + style(f"  ({n_side})" if n_side else "", "gray"))
         if len(L) < 10:
             print_note("too few hits: check --primer-f/--primer-r, the tag file and the sample sheet")
+            E["too_few"] = True
             continue
         S = L[:a.n_align]
+        E["used"] = len(S)
         print(style(f"    % = of {fmt_int(len(S))} hits" + (f" (first {fmt_int(len(S))} of {fmt_int(len(L))})"
                                                              if len(S) < len(L) else ""), "gray"))
         pc = lambda n: style(f"{100 * n / len(S):5.1f}%", pct_color(100 * n / len(S)))
@@ -1301,6 +1407,9 @@ def cmd_context(a):
             k = present_edits(len(seq))
             rows.append([style(ctx, "cyan"), name, str(len(seq)), pc(sum(e == 0 for e in full)),
                          *(pc(sum(e <= m for e in full)) for m in (1, 2, 3)), f"{pc(sum(e <= k for e in full))} (<= {k})"])
+            E.setdefault("known", []).append({"ctx": ctx, "name": name, "len": len(seq), "k": k,
+                                              "within": [sum(e <= m for e in full) / len(S) for m in (0, 1, 2, 3)],
+                                              "present": sum(e <= k for e in full) / len(S)})
         print_table(["-c", "whole adapter 5' of the utag", "nt", "exact", "<=1", "<=2", "<=3 edits", "present"],
                     rows, "<<>>>>>>", indent=4)
         print(style("    hits with the whole adapter right before the utag, within that many edits; "
@@ -1311,15 +1420,19 @@ def cmd_context(a):
             print(f"\n    {style(ctx, 'cyan')} adapter: % of hits with its last n nt right before the utag, "
                   "within that many edits")
             rows = []
+            E["suffix"] = {"ctx": ctx, "rows": []}
             for n in sorted({n for n in (6, 8, 12, 16, qlen, len(seq)) if n <= len(seq)}):
                 note = "  (-c " + ctx + ")" if n == qlen else "  (whole)" if n == len(seq) else ""
                 rows.append([f"last {n}{note}", color_seq(seq[-n:]),
                              *(pc(sum(d[n] <= m for d in D[ctx])) for m in (0, 1, 2, 3))])
+                E["suffix"]["rows"].append({"n": n, "note": note.strip(" ()"), "seq": seq[-n:],
+                                            "within": [sum(d[n] <= m for d in D[ctx]) / len(S) for m in (0, 1, 2, 3)]})
             print_table(["suffix", "sequence  <utag>", "exact", "<=1", "<=2", "<=3 edits"], rows, "<>>>>>", indent=4)
         # 3. per-position consensus: shows sequence beyond the known adapters (unknown kits)
-        cons, supp = [], []
+        cons, supp, logo = [], [], []
         for pos in range(U):
             c = Counter(x[pos] for x in L if x[pos] != "-")
+            logo.append([c[b] / len(L) for b in "ACGT"])
             n = sum(c.values())
             b, k = c.most_common(1)[0] if c else ("-", 0)
             cons.append(b if n and k / len(L) >= 0.5 else ".")
@@ -1329,6 +1442,7 @@ def cmd_context(a):
         while j > 0 and supp[j - 1] >= a.min_support:
             j -= 1
         top = Counter(x[-12:] for x in L).most_common(3)
+        E.update(consensus=cs, support=supp, prefix=cs[j:], logo=logo, top12=top)
         print()
         print_kv([
             ("consensus", color_seq(cs) + "  " + style("<utag>", "bold", "magenta")),
@@ -1341,7 +1455,12 @@ def cmd_context(a):
     print(style("\n  consensus: majority base at each position before the utag ('.' = none); support digit = "
                 "tens of % of all hits at that read end with that base (9 = 90-100%)", "gray"))
     if dists:
-        context_verdict(dists, ups, a.n_align)
+        R["verdict"] = context_verdict(dists, ups, a.n_align)
+    if a.html:
+        with open(a.html, "w", encoding="utf-8") as fh:
+            fh.write(CONTEXT_HTML.replace("__DATA__", json.dumps(R, separators=(",", ":")).replace("</", "<\\/")))
+        print()
+        print_kv([("report", rel(a.html))])
 
 
 def context_ok(D, n):
@@ -1352,7 +1471,7 @@ def context_ok(D, n):
 
 def context_verdict(dists, ups, n_align):
     """Say which -c context the reads look like, whether its query fits at both read ends, and which ONT barcodes
-    are there for nbd / mab."""
+    are there for nbd / mab. Returns the same as a dict for the HTML report."""
     print_step("context: suggestion")
     frac = lambda where, ctx, n: sum(context_ok(dists[where][ctx], n)) / len(dists[where][ctx])
     # the kit is decided at the read start (full adapter there); fall back to the read end
@@ -1363,14 +1482,17 @@ def context_verdict(dists, ups, n_align):
         print_info(f"no known adapter directly 5' of the utag (best: {ctx}, {100 * f0:.0f}% at the read {where0}): "
                    "the reads look trimmed (adapter/barcode removed) or the kit is unknown")
         print_kv([("use", style("-c bare", "bold") + "  (or --prefix from the consensus above)")], indent=4)
-        return
+        return {"status": "none", "ctx": ctx, "frac": f0, "where": where0, "use": "utag demux -c bare",
+                "alt": "utag demux -c bare --prefix <consensus prefix>"}
     n0 = len(dists[where0][ctx])
     print_ok(f"{name}: the whole adapter is right before the utag in {100 * f0:.0f}% of {fmt_int(n0)} hits at the "
              f"read {where0}  ->  kit context " + style("-c " + ctx, "bold"))
     # can the -c query (last qlen nt) be found at both read ends? the read end often stops inside the adapter
+    V = {"status": "ok", "ctx": ctx, "name": name, "frac": f0, "where": where0, "hits": n0, "rows": [], "notes": []}
     rows, longest = [], None
     for n in sorted({n for n in (6, 8, 12, 16, qlen, len(seq)) if n <= len(seq)}):
         fr = {w: frac(w, ctx, n) for w in dists}
+        V["rows"].append({"n": n, "query": n == qlen, "seq": seq[-n:], "edits": present_edits(n), **fr})
         rows.append([f"last {n}" + ("  (-c " + ctx + ")" if n == qlen else ""), color_seq(seq[-n:]), f"<= {present_edits(n)}",
                      *(style(f"{100 * fr[w]:5.1f}%", pct_color(100 * fr[w])) if w in fr else "-" for w in ("start", "end"))])
         if all(v >= 0.7 for v in fr.values()):
@@ -1384,16 +1506,19 @@ def context_verdict(dists, ups, n_align):
     use = f"utag demux -c {ctx}"
     alt = None
     if not q_ok and longest:
-        print_note(f"the far end of most reads stops inside the adapter: only the last {longest} nt are there, not the "
-                   f"{qlen} nt of the -c {ctx} query. barbell tolerates a partial flank, so -c {ctx} still works; "
-                   f"--prefix {seq[-longest:]} matches both ends and may assign slightly more reads")
+        V["notes"].append(f"the far end of most reads stops inside the adapter: only the last {longest} nt are there, not the "
+                          f"{qlen} nt of the -c {ctx} query. barbell tolerates a partial flank, so -c {ctx} still works; "
+                          f"--prefix {seq[-longest:]} matches both ends and may assign slightly more reads")
+        print_note(V["notes"][-1])
         alt = f"utag demux --prefix {seq[-longest:]}"
     elif not q_ok:
-        print_note(f"even a short adapter suffix is missing at one read end: try -c bare (utag + primer only)")
+        V["notes"].append("even a short adapter suffix is missing at one read end: try -c bare (utag + primer only)")
+        print_note(V["notes"][-1])
         use = "utag demux -c bare"
+    V.update(q_ok=q_ok, use=use, alt=alt)
     if ctx == "lsk":
         print_kv([("use", style(use, "bold"))] + ([("or", alt)] if alt else []), indent=4)
-        return
+        return V
     # nbd / mab: which ONT barcodes are 5' of the flank (a subsample of the read starts where the flank is present)
     seqs, flank, kit = (NB_SEQS, NB_REAR, "SQK-NBD114-96") if ctx == "nbd" else (MAB_SEQS, MAB_TOPO, "SQK-MAB114-24")
     cand = [u for u in ups[where0][:n_align] if suffix_edits(flank, u)[-1] <= present_edits(len(flank))][:BARCODE_SAMPLE]
@@ -1411,6 +1536,9 @@ def context_verdict(dists, ups, n_align):
     elif main and q_ok:
         use = f"utag demux -c nbd --ont-barcode {main[0]}   (or plain -c nbd)"
     print_kv([("use", style(use, "bold"))], indent=4)
+    V.update(use=use, barcodes=[[k, v / max(1, len(cand))] for k, v in top], checked=len(cand),
+             unclear=bc["?"] / max(1, len(cand)))
+    return V
 
 
 def cmd_queries(a):
@@ -1619,6 +1747,148 @@ def start_log(outdir, name="utag.log"):
     return path
 
 
+CONTEXT_HTML = r"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>utag context</title>
+<style>
+:root{color-scheme:light;--bg:#f9f9f7;--panel:#fcfcfb;--panel2:#f1f0ec;--ink:#0b0b0b;--dim:#52514e;--muted:#898781;--grid:#e1e0d9;
+  --ring:rgba(11,11,11,.10);--s1:#2a78d6;--good:#006300;--warn:#a86400;--bad:#d03b3b;
+  --q0:#f1f0ec;--q1:#cde2fb;--q2:#9ec5f4;--q3:#6da7ec;--q4:#3987e5;--q5:#256abf;
+  --A:#1a9850;--C:#2a78d6;--G:#e6a100;--T:#d03b3b}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:13px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+header{padding:18px 24px 12px;border-bottom:1px solid var(--grid)}h1{margin:0;font-size:19px;font-weight:650}
+.sub{color:var(--dim);font-size:12px;margin-top:2px;word-break:break-all}
+main{max-width:1280px;margin:0 auto;padding:16px 24px 48px;display:grid;gap:16px}
+.panel{background:var(--panel);border:1px solid var(--ring);border-radius:12px;padding:14px 16px 16px;min-width:0}
+h2{margin:-14px -16px 12px;padding:9px 16px;background:#e7eef8;border-bottom:1px solid var(--ring);border-radius:12px 12px 0 0;
+  font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:#1c3d66;font-weight:650}
+h3{margin:14px 0 6px;font-size:12.5px;font-weight:600}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px}
+.tile{background:var(--panel2);border-radius:10px;padding:8px 12px}.tile .v{font-size:20px;font-weight:650}.tile .k{color:var(--dim);font-size:12px}
+.use{font:600 15px/1.4 ui-monospace,Menlo,monospace;background:var(--panel2);border-radius:8px;padding:8px 12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.use button{margin-left:auto;font:12px system-ui;border:1px solid var(--ring);background:var(--panel);border-radius:6px;padding:2px 9px;cursor:pointer}
+.verdict{font-size:14px;margin:0 0 10px}.verdict b{font-weight:650}
+.ok{color:var(--good)}.no{color:var(--warn)}
+.two{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px}
+@media (max-width:1000px){.two{grid-template-columns:1fr}header,main{padding-left:16px;padding-right:16px}}
+.scroll{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}
+th,td{padding:4px 8px;border-bottom:1px solid var(--grid);text-align:right;white-space:nowrap}
+th{color:var(--dim);font-weight:600}th:first-child,td:first-child{text-align:left}
+td.l,th.l{text-align:left}.seq{font-family:ui-monospace,Menlo,monospace;font-size:12px;letter-spacing:.02em}
+.cell{display:inline-block;min-width:52px;border-radius:4px;padding:1px 6px;text-align:right}
+.bar{display:inline-block;width:90px;height:8px;border-radius:4px;background:var(--q0);vertical-align:middle;margin-left:6px;overflow:hidden}
+.bar i{display:block;height:100%;background:var(--s1);border-radius:4px}
+.note{color:var(--dim);font-size:12px;line-height:1.5;margin:6px 0}
+.warn{color:var(--dim)}.warn::before{content:"! ";color:var(--warn);font-weight:700}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:3px 14px;font-size:12.5px;margin-top:8px}.kv dt{color:var(--dim)}.kv dd{margin:0;word-break:break-all}
+svg text{fill:var(--dim);font-size:10px}
+.legend{display:flex;flex-wrap:wrap;gap:4px 12px;color:var(--dim);font-size:11.5px;margin:4px 0}.legend span{white-space:nowrap}
+#ends{grid-auto-rows:auto;row-gap:0}
+#ends>.panel{display:grid;grid-row:span 6;grid-template-rows:subgrid;row-gap:0;align-content:start}
+#ends>.panel>div{min-width:0}
+#ends table.tk,#ends table.ts{table-layout:fixed}#ends .tk td:nth-child(2){overflow:hidden;text-overflow:ellipsis}
+#ends th,#ends td{padding:3px 4px;font-size:12px}#ends .ts .seq{font-size:11px;letter-spacing:0}#ends .tk td:nth-child(2){font-size:11.5px}
+#ends .kv dd span{word-break:normal}
+tr.pick td{background:#e7eef8}tr.pick td:first-child{border-radius:4px 0 0 4px}tr.pick td:last-child{border-radius:0 4px 4px 0}th.r{text-align:right!important}th.grp{text-align:center!important;border-bottom:1px solid var(--axis,#c3c2b7);padding-bottom:2px}th[rowspan]{vertical-align:bottom}
+#ends .tk td,#ends .tk th{overflow:hidden;font-size:11.5px;padding:3px 3px}#ends .cell{min-width:44px;padding:1px 4px}#ends .bar{width:50px}.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;vertical-align:-1px}
+details summary{cursor:pointer;color:var(--dim)}
+</style></head><body>
+<header><h1>utag context</h1><div class="sub" id="sub"></div></header>
+<main>
+  <section class="panel"><h2>Hits</h2><div class="tiles" id="tiles"></div>
+    <div class="note">hit: <span id="rule"></span><br>
+    read start: hit in the read as sequenced. read end: hit in the reverse complement; the adapter is shown reverse-complemented, in the same orientation as at the start.</div></section>
+  <div class="two" id="ends"></div>
+  <section class="panel"><h2>Suggestion</h2><div id="verdict"></div></section>
+  <section class="panel"><h2>Run</h2><dl class="kv" id="run"></dl></section>
+</main>
+<script>
+const R = __DATA__;
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const fmt = n => Number(n).toLocaleString("en-US");
+const pf = f => (100 * f).toFixed(1) + "%";
+const qv = ["--q0", "--q1", "--q2", "--q3", "--q4", "--q5"];
+const heat = f => { const i = f <= 0 ? 0 : Math.min(5, 1 + Math.floor(f * 5)); return `<span class="cell" style="background:var(${qv[i]});${i >= 4 ? "color:#fff" : ""}">${pf(f)}</span>`; };
+const bar = f => `<span class="bar"><i style="width:${(100 * f).toFixed(1)}%"></i></span>`;
+const cseq = s => [...s].map(c => `<span style="color:var(--${"ACGT".includes(c) ? c : "muted"})">${esc(c)}</span>`).join("");
+$("rule").textContent = R.hit_rule;
+$("sub").textContent = `${R.started} · ${R.n_files} input file${R.n_files === 1 ? "" : "s"}: ${R.reads.join(", ")}${R.n_files > R.reads.length ? ", …" : ""}`;
+
+// ---- suggestion
+const V = R.verdict, E = R.ends;
+let vh = "";
+if (!V) vh = `<p class="verdict no">too few hits at both read ends: check --primer-f/--primer-r, the tag file and the sample sheet</p>`;
+else if (V.status === "none") vh = `<p class="verdict no">no known adapter directly 5' of the utag (best: <b>${esc(V.ctx)}</b>, ${pf(V.frac)} at the read ${esc(V.where)}): the reads look trimmed (adapter/barcode removed) or the kit is unknown</p>`;
+else vh = `<p class="verdict"><span class="ok">✓</span> <b>${esc(V.name)}</b>: the whole adapter is right before the utag in <b>${pf(V.frac)}</b> of ${fmt(V.hits)} hits at the read ${esc(V.where)} → kit context <b>-c ${esc(V.ctx)}</b></p>`;
+if (V) {
+  vh += `<div class="use"><span>${esc(V.use)}</span><button onclick="navigator.clipboard&&navigator.clipboard.writeText(this.previousElementSibling.textContent);this.textContent='copied'">copy</button></div>`;
+  if (V.alt) vh += `<div class="note">or <span class="seq">${esc(V.alt)}</span></div>`;
+  (V.notes || []).forEach(n => vh += `<div class="note warn">${esc(n)}</div>`);
+  if (V.rows) {
+    const ends = ["start", "end"].filter(w => E[w] && !E[w].too_few);
+    vh += `<h3>${esc(V.ctx)} adapter suffix at both read ends</h3><div class="scroll"><table><tr><th>adapter suffix</th><th>sequence &lt;utag&gt;</th><th>edits</th>${ends.map(w => `<th>read ${w}</th>`).join("")}</tr>` +
+      V.rows.map(r => `<tr><td>last ${r.n}${r.query ? ` <b>(-c ${esc(V.ctx)})</b>` : ""}</td><td class="seq">${cseq(r.seq)}</td><td>≤ ${r.edits}</td>${ends.map(w => `<td>${r[w] === undefined ? "–" : heat(r[w])}</td>`).join("")}</tr>`).join("") +
+      `</table></div><div class="note">% of hits at that read end with the suffix right before the utag, within the edits shown; the -c query should be ≥ 70% at both ends</div>`;
+  }
+  if (V.barcodes) vh += `<h3>ONT barcodes</h3><table style="max-width:420px"><tr><th>barcode</th><th>hits</th><th></th></tr>` +
+    V.barcodes.map(([b, f]) => `<tr><td>${esc(b)}</td><td>${pf(f)}</td><td class="l">${bar(f)}</td></tr>`).join("") +
+    `</table><div class="note">of ${V.checked} hits checked; ${pf(V.unclear)} unclear</div>`;
+}
+$("verdict").innerHTML = vh;
+
+// ---- hits
+const W = R.with_hit, sc = Math.max(1, R.scanned);
+$("tiles").innerHTML = [["reads scanned", fmt(R.scanned), ""], ["reads with a hit", fmt(W.any || 0), pf((W.any || 0) / sc)],
+  ["hit at read start", fmt(W.start || 0), pf((W.start || 0) / sc)], ["hit at read end", fmt(W.end || 0), pf((W.end || 0) / sc)], ["hit at both ends", fmt(W.both || 0), pf((W.both || 0) / sc)]]
+  .map(([k, v, p]) => `<div class="tile"><div class="k">${k}</div><div class="v">${v} <span style="font-size:13px;color:var(--dim);font-weight:400">${p}</span></div></div>`).join("");
+
+// ---- per read end
+function logo(e, known) {                 // base frequencies per position before the utag (share of all hits)
+  const U = e.logo.length, cw = 12, lw = 34, H = 96, Wd = lw + U * cw + 40, base = 8 + H;
+  let h = `<svg viewBox="0 0 ${Wd} ${base + 58}" width="100%" role="img" aria-label="base frequencies before the utag">`;
+  for (const f of [0, .5, 1]) h += `<line x1="${lw}" x2="${lw + U * cw}" y1="${base - f * H}" y2="${base - f * H}" stroke="var(--grid)"/><text x="${lw - 4}" y="${base - f * H + 3}" text-anchor="end">${f * 100}%</text>`;
+  e.logo.forEach((fr, i) => { let y = base;
+    ["A", "C", "G", "T"].map((b, k) => [b, fr[k]]).sort((a, b) => a[1] - b[1]).forEach(([b, f]) => { const hh = f * H; if (hh < 1) return;
+      h += `<text transform="translate(${lw + i * cw + 0.5} ${y.toFixed(2)}) scale(${(cw - 1) / 7.2} ${(hh / 9.4).toFixed(3)})" style="font:700 13px ui-monospace,Menlo,monospace;fill:var(--${b})">${b}<title>-${U - i}: ${b} ${pf(f)}</title></text>`; y -= hh; }); });
+  h += `<text x="${lw + U * cw + 4}" y="${base - 2}" style="fill:var(--ink);font-weight:600">utag</text>`;
+  for (let i = 0; i < U; i += 10) h += `<text x="${lw + i * cw + cw / 2}" y="${base + 12}" text-anchor="middle">-${U - i}</text>`;
+  const row = (y, lab, s, title) => { let t = `<text x="${lw - 4}" y="${y}" text-anchor="end">${lab}</text>`;
+    [...s].forEach((c, i) => { const x = lw + (U - s.length + i) * cw + cw / 2; if (x < lw) return;
+      t += `<text x="${x}" y="${y}" text-anchor="middle" style="font:600 11px ui-monospace,Menlo,monospace;fill:var(--${"ACGT".includes(c) ? c : "muted"})">${esc(c)}</text>`; });
+    return t + (title ? `<text x="${lw + U * cw + 4}" y="${y}">${esc(title)}</text>` : ""); };
+  h += row(base + 30, "cons.", e.consensus, "");
+  if (known) h += row(base + 48, "-c " + known.ctx, known.seq, "");
+  return h + "</svg>";
+}
+$("ends").innerHTML = ["start", "end"].map(w => { const e = E[w]; if (!e) return "";
+  const title = w === "start" ? "Read start <span style='text-transform:none;letter-spacing:0;font-weight:400'>(utag near the 5' end of the read)</span>" : "Read end <span style='text-transform:none;letter-spacing:0;font-weight:400'>(utag near the 3' end, shown reverse-complemented)</span>";
+  const slot = [`<h2>${title}</h2>`], out = () => `<section class="panel">${[...slot, "", "", "", "", ""].slice(0, 6).map(x => x.startsWith("<h2") ? x : `<div>${x}</div>`).join("")}</section>`;
+  slot.push(`<div class="note" style="margin-top:0">${fmt(e.hits)} hits (${Object.entries(e.sides).map(([k, v]) => k + " " + fmt(v)).join(", ")})${e.used ? `; % of the first ${fmt(e.used)} hits` : ""}</div>`);
+  if (e.too_few) { slot.push(`<div class="note warn">too few hits: check --primer-f/--primer-r, the tag file and the sample sheet</div>`); return out(); }
+  slot.push(`<h3>whole adapter 5' of the utag</h3><div><table class="tk"><colgroup><col style="width:7%"><col style="width:35%"><col style="width:6%"><col style="width:10.4%"><col style="width:10.4%"><col style="width:10.4%"><col style="width:10.4%"><col style="width:10.4%"></colgroup><tr><th rowspan="2">-c</th><th rowspan="2" class="l">adapter</th><th rowspan="2">nt</th><th rowspan="2">exact</th><th colspan="3" class="grp">edits</th><th rowspan="2">present</th></tr><tr><th class="r">≤1</th><th>≤2</th><th>≤3</th></tr>` +
+    e.known.map(k => `<tr class="${V && V.status === "ok" && k.ctx === V.ctx ? "pick" : ""}"><td><b>${esc(k.ctx)}</b></td><td class="l" title="${esc(k.name)}">${esc(k.name)}</td><td>${k.len}</td>${k.within.map(f => `<td>${pf(f)}</td>`).join("")}<td title="within ${k.k} edits (~15% of its length)"><b>${pf(k.present)}</b></td></tr>`).join("") +
+    `</table></div><div class="note">hits with the whole adapter right before the utag, within 0-3 edits; present = within ~15% of its length</div>`);
+  slot.push(!e.suffix ? `<div class="note">no known adapter in enough hits for a suffix table</div>` : `<h3>${esc(e.suffix.ctx)} adapter: last n nt right before the utag</h3><div class="scroll"><table class="ts"><colgroup><col style="width:19%"><col style="width:41%"><col style="width:10%"><col style="width:10%"><col style="width:10%"><col style="width:10%"></colgroup><tr><th rowspan="2">suffix</th><th rowspan="2">sequence &lt;utag&gt;</th><th rowspan="2">exact</th><th colspan="3" class="grp">edits</th></tr><tr><th class="r">≤1</th><th>≤2</th><th>≤3</th></tr>` +
+    e.suffix.rows.map(r => `<tr><td>last ${r.n}${r.note ? ` <span style="color:var(--dim)">(${esc(r.note)})</span>` : ""}</td><td class="seq">${cseq(r.seq)}</td>${r.within.map(f => `<td>${heat(f)}</td>`).join("")}</tr>`).join("") + "</table></div>");
+  const known = e.suffix ? R.known.find(k => k.ctx === e.suffix.ctx) : null;
+  slot.push(`<h3>base frequency, ${e.logo.length} nt 5' of the utag</h3><div class="legend">${["A", "C", "G", "T"].map(b => `<span><i style="background:var(--${b})"></i>${b}</span>`).join("")}<span style="white-space:normal">letter height = fraction of all hits with that base</span></div>${logo(e, known)}`);
+  slot.push(`<dl class="kv"><dt>consensus prefix</dt><dd class="seq">${e.prefix ? cseq(e.prefix) : "(none)"} <span style="color:var(--dim);font-family:system-ui">${e.prefix.length} nt ≥ ${R.min_support}% at the same position; indels and short read ends shorten it</span></dd>` +
+    `<dt>most common 12 nt</dt><dd class="seq">${e.top12.map(([s, n]) => `${cseq(s)} <span style="color:var(--dim)">×${fmt(n)}</span>`).join(" &nbsp; ")}` +
+    `<div style="color:var(--dim);font-family:system-ui;font-size:11.5px">- = no sequence (read starts there)</div></dd></dl>`);
+  return out(); }).join("");
+
+// ---- run
+$("run").innerHTML = [["command", `<span class="seq">${esc(R.command)}</span>`], ["cwd", esc(R.cwd)], ["input", esc(R.reads.join(", ")) + (R.n_files > R.reads.length ? ` (+${R.n_files - R.reads.length} more)` : "")],
+  ["tags", esc(R.tags)], ["primers", `<span class="seq">${esc(R.primer_f)}</span> / <span class="seq">${esc(R.primer_r)}</span>`],
+  ["settings", `${fmt(R.scanned)} reads scanned from ${fmt(R.files_used)} of ${fmt(R.n_files)} files, ${R.upstream} nt upstream, first ${fmt(R.n_align)} hits per read end aligned`]]
+  .map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("");
+</script></body></html>
+"""
+
+
 def main():
     here = os.path.dirname(os.path.realpath(__file__))
     raw = argparse.RawDescriptionHelpFormatter
@@ -1704,10 +1974,17 @@ def main():
     cx = sp.add_parser("context", epilog=INPUT_HELP, formatter_class=raw, help="find the real kit context: align the sequence upstream of the utags to the known adapters")
     common(cx)
     cx.add_argument("-r", "--reads", nargs="+", required=True)
-    cx.add_argument("-n", "--n-reads", type=int, default=20000, help="reads to scan (default 20000)")
+    cx.add_argument("-n", "--n-reads", type=int, default=20000,
+                    help="reads to scan, spread evenly over the input files (default 20000)")
     cx.add_argument("--upstream", type=int, default=50, help="nt upstream of the utag to report (default 50)")
+    cx.add_argument("--max-offset", type=int, default=250, help="max distance of the utag from the read end (default 250)")
+    cx.add_argument("--exact", action="store_true",
+                    help="hit = exact utag + first 10 nt of the primer anywhere in the read (default: primer <= 2 edits "
+                         "within --max-offset of a read end, utag <= 2 edits right before it)")
     cx.add_argument("--n-align", type=int, default=2000, help="hits per read end aligned to the known adapters (default 2000)")
     cx.add_argument("--min-support", type=float, default=60, help="%% of hits needed per base for the consensus prefix (default 60)")
+    cx.add_argument("--html", default="context_report.html", metavar="FILE",
+                    help="also write an HTML report (default context_report.html; --html '' to skip)")
     cx.set_defaults(fn=cmd_context)
 
     t = sp.add_parser("tagqc", epilog=INPUT_HELP, formatter_class=raw, help="check the tag set, plate map layout and sample sheet coverage")
