@@ -240,6 +240,7 @@ LSK_ADAPTER_TAIL = LSK_ADAPTER[-22:]
 # starts with utag-fwd + fwd primer or utag-rev + rev primer. CCCTT is the vaccinia TOPO site; barbell's kit uses only
 # TTTAACC / CCATATCCGTGTC and its trim sometimes cuts into GCCCTT, so twopass pass 2 uses no prefix (bare).
 MAB_TOPO = "CCATATCCGTGTCGCCCTT"
+MAB_FRONT = "GCTTGGGTGTTTAACC"                 # end of the rapid adapter, directly 5' of the AB barcode
 MAB_PREFIX = MAB_TOPO[-6:]                     # GCCCTT: directly 5' of the utag on untrimmed reads (-c mab)
 MAB_SEQS = {    # Dorado TP01-TP24 = barbell AB01-AB24
     "AB01": "GCACCTGGAACTTGTGCCTTCCAC", "AB02": "CCGAAATAGGTTATCTGTTGTTGT",
@@ -1264,6 +1265,10 @@ KNOWN_CONTEXTS = [("lsk", "Ligation Adapter (SQK-LSK114)", LSK_ADAPTER, len(LSK_
 
 
 BARCODE_SAMPLE = 150     # hits checked for the NB / AB barcode (96 alignments each)
+# what sits 5' of the utag for kits with an ONT barcode, 5' -> 3': [label, sequence or None (= the barcode), length]
+BARCODE_LAYOUT = {"lsk": [["Ligation Adapter", LSK_ADAPTER[:-1], len(LSK_ADAPTER) - 1], ["T", "T", 1]],   # T: 3' overhang on the dA tail
+                  "nbd": [["NB front", NB_FRONT, len(NB_FRONT)], ["NB barcode", None, 24], ["NB rear", NB_REAR, len(NB_REAR)]],
+                  "mab": [["rapid adapter", MAB_FRONT, len(MAB_FRONT)], ["AB barcode", None, 24], ["TOPO site", MAB_TOPO, len(MAB_TOPO)]]}
 
 
 def present_edits(n):
@@ -1384,7 +1389,8 @@ def cmd_context(a):
          "reads": [rel(f) for f in reads[:5]], "n_files": len(reads), "files_used": n_used, "scanned": seen, "with_hit": dict(with_hit),
          "n_align": a.n_align, "upstream": U, "min_support": a.min_support, "tags": rel(a.tags),
          "primer_f": a.primer_f or PRIMER_F, "primer_r": a.primer_r or PRIMER_R,
-         "known": [{"ctx": c, "name": nm, "seq": sq, "qlen": ql} for c, nm, sq, ql in KNOWN_CONTEXTS], "ends": {}}
+         "known": [{"ctx": c, "name": nm, "seq": sq, "qlen": ql, "layout": BARCODE_LAYOUT.get(c)} for c, nm, sq, ql in KNOWN_CONTEXTS],
+         "ends": {}}
     print_step("context: sequence upstream of the utags")
     print_info(f"scanned {fmt_int(seen)} reads from {fmt_int(n_used)} of {fmt_int(len(reads))} files "
                f"(up to {fmt_int(-(-a.n_reads // max(1, len(reads))))} per file); hit = {hit_rule}")
@@ -1551,7 +1557,7 @@ def context_verdict(dists, ups, n_align):
     elif main and q_ok:
         use = f"utag demux -c nbd --ont-barcode {main[0]}   (or plain -c nbd)"
     print_kv([("use", style(use, "bold"))], indent=4)
-    V.update(use=use, barcodes=[[k, v / max(1, len(cand))] for k, v in top], checked=len(cand),
+    V.update(use=use, barcodes=[[k, v / max(1, len(cand)), seqs[k]] for k, v in top], checked=len(cand),
              unclear=bc["?"] / max(1, len(cand)))
     return V
 
@@ -1848,8 +1854,8 @@ if (V) {
       V.rows.map(r => `<tr><td>last ${r.n}${r.query ? ` <b>(-c ${esc(V.ctx)})</b>` : ""}</td><td class="seq">${cseq(r.seq)}</td><td>≤ ${r.edits}</td>${ends.map(w => `<td>${r[w] === undefined ? "–" : heat(r[w])}</td>`).join("")}</tr>`).join("") +
       `</table></div><div class="note">% of hits at that read end with the suffix right before the utag, within the edits shown; the -c query should be ≥ 70% at both ends</div>`;
   }
-  if (V.barcodes) vh += `<h3>ONT barcodes</h3><table style="max-width:420px"><tr><th>barcode</th><th>hits</th><th></th></tr>` +
-    V.barcodes.map(([b, f]) => `<tr><td>${esc(b)}</td><td>${pf(f)}</td><td class="l">${bar(f)}</td></tr>`).join("") +
+  if (V.barcodes) vh += `<h3>ONT barcodes</h3><table style="max-width:640px"><tr><th>barcode</th><th class="l">sequence</th><th>hits</th><th></th></tr>` +
+    V.barcodes.map(([b, f, sq]) => `<tr><td>${esc(b)}</td><td class="l seq">${cseq(sq || "")}</td><td>${pf(f)}</td><td class="l">${bar(f)}</td></tr>`).join("") +
     `</table><div class="note">of ${V.checked} hits checked; ${pf(V.unclear)} unclear</div>`;
 }
 $("verdict").innerHTML = vh;
@@ -1862,8 +1868,25 @@ $("tiles").innerHTML = [["reads scanned", fmt(R.scanned), ""], ["reads with a hi
 
 // ---- per read end
 function logo(e, known) {                 // base frequencies per position before the utag (share of all hits)
-  const U = e.logo.length, cw = 12, lw = 34, H = 96, Wd = lw + U * cw + 40, base = 8 + H;
+  const lay = known && known.layout, U = e.logo.length, cw = 12, lw = 44, H = 96, Wd = lw + U * cw + 40, top = lay ? 24 : 8, base = top + H;
+  const xi = p => lw + (U - p) * cw;      // left edge of position -p (p = 1 is the base right before the utag)
   let h = `<svg viewBox="0 0 ${Wd} ${base + 58}" width="100%" role="img" aria-label="base frequencies before the utag">`;
+  // kit layout (nbd / mab): constant parts and the ONT barcode as bands behind the letters
+  let bcSeq = "";
+  if (lay) {
+    const bcs = V && V.ctx === known.ctx && V.barcodes ? V.barcodes : [];
+    const bc = bcs.length && bcs[0][1] >= 0.8 ? bcs[0] : null;           // one barcode: show its sequence
+    const bcLab = bc ? ` (${bc[0]})` : bcs.length > 1 ? ` (mixed: ${bcs.slice(0, 3).map(b => b[0]).join(", ")})` : "";
+    let p = 0;
+    [...lay].reverse().forEach(([lab, sq, n]) => {
+      const p0 = p + 1, p1 = p + n; p = p1;                  // positions -p1 .. -p0
+      bcSeq = (sq || (bc ? bc[2] : "·".repeat(n))) + bcSeq;
+      if (p0 > U) return;
+      const x0 = xi(Math.min(p1, U)), x1 = xi(p0) + cw, isBc = !sq;
+      h += `<rect x="${x0}" y="${top - 16}" width="${x1 - x0}" height="${H + 16}" fill="${isBc ? "#fdf0d5" : "#eef2f7"}" rx="3"/>`;
+      h += `<text x="${(x0 + x1) / 2}" y="${top - 5}" text-anchor="middle" style="fill:${isBc ? "#8a5a00" : "var(--dim)"};font-weight:${isBc ? 650 : 500}">${esc(lab)}${isBc ? esc(bcLab) : ""}${p1 > U ? " …" : ""}</text>`;
+    });
+  }
   for (const f of [0, .5, 1]) h += `<line x1="${lw}" x2="${lw + U * cw}" y1="${base - f * H}" y2="${base - f * H}" stroke="var(--grid)"/><text x="${lw - 4}" y="${base - f * H + 3}" text-anchor="end">${f * 100}%</text>`;
   e.logo.forEach((fr, i) => { let y = base;
     ["A", "C", "G", "T"].map((b, k) => [b, fr[k]]).sort((a, b) => a[1] - b[1]).forEach(([b, f]) => { const hh = f * H; if (hh < 1) return;
@@ -1875,7 +1898,11 @@ function logo(e, known) {                 // base frequencies per position befor
       t += `<text x="${x}" y="${y}" text-anchor="middle" style="font:600 11px ui-monospace,Menlo,monospace;fill:var(--${"ACGT".includes(c) ? c : "muted"})">${esc(c)}</text>`; });
     return t + (title ? `<text x="${lw + U * cw + 4}" y="${y}">${esc(title)}</text>` : ""); };
   h += row(base + 30, "cons.", e.consensus, "");
-  if (known) h += row(base + 48, "-c " + known.ctx, known.seq, "");
+  if (known) {
+    const q = Math.min(known.qlen || 0, U);
+    if (q) h += `<rect x="${xi(q)}" y="${base + 37}" width="${q * cw}" height="15" rx="3" fill="#e7eef8"><title>-c ${esc(known.ctx)} query: last ${known.qlen} nt</title></rect>`;
+    h += row(base + 48, "-c " + known.ctx, lay ? bcSeq : known.seq, q ? "query" : "");
+  }
   return h + "</svg>";
 }
 $("ends").innerHTML = ["start", "end"].map(w => { const e = E[w]; if (!e) return "";
