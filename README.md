@@ -130,7 +130,7 @@ Other subcommands: `queries` (write the query FASTAs only), `tagqc` (check tags,
 
 | Option | Default | Format | Example row |
 |---|---|---|---|
-| `--tags` | `data/utags-sequence.csv` | no header: `tag ID,sequence` | `U013,CAACAGTAG` |
+| `--tags` | `data/utags-sequence.csv` | `utag,sequence` (header optional) | `U013,CAACAGTAG` |
 | `--plates` | `data/utags-platemap.csv` | `plate,well,utag-fwd,utag-rev` | `1,A1,U013,U001` |
 | `--samplesheet` | none | `sample,plate,well[,ont-barcode]`, csv or `.xlsx` | `Soil_A,1,A1` |
 

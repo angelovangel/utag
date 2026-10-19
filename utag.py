@@ -7,8 +7,8 @@ Any primer pair works (--primer-f / --primer-r); defaults are 16S 27F / 1492R.
 Library model (5'->3' of each tagged PCR primer):
 
     [ONT context] [utag] [primer]
-      left  : ctx + utag-fwd + forward primer   (default 27F    AGRGTTYGATYMTGGCTCAG)
-      right : ctx + utag-rev + reverse primer   (default 1492R  RGYTACCTTGTTACGACTT)
+      left  : ctx + utag-fwd + forward primer   (default 27F    {PRIMER_F})
+      right : ctx + utag-rev + reverse primer   (default 1492R  {PRIMER_R})
 
 Both queries are written in oligo (5'->3') orientation, which is what barbell
 expects for Ftag/Rtag FASTAs; barbell finds them on either read strand.
@@ -16,11 +16,32 @@ expects for Ftag/Rtag FASTAs; barbell finds them on either read strand.
 Only needs Python >= 3.8 (stdlib) and the `barbell` binary.
 """
 
-INPUT_HELP = """\
+import argparse, csv, glob, gzip, itertools, json, os, random, re, resource, shutil
+import subprocess, sys, time
+from collections import Counter, defaultdict
+
+# ---- defaults ------------------------------------------------------------------------------------------------------
+PRIMER_F = "AGRGTTYGATYMTGGCTCAG"            # --primer-f  16S 27F
+PRIMER_R = "RGYTACCTTGTTACGACTT"             # --primer-r  16S 1492R
+TAGS = "data/utags-sequence.csv"             # --tags      9 nt utags (paths relative to this script's folder)
+PLATES = "data/utags-platemap.csv"           # --plates    CDI: 32 fwd x 12 rev utags = 4 x 96 wells
+MAB_TAGS = "data/utags-10bp-sequence.csv"    # --tags      for twopass -k SQK-MAB* (the MAB plate map's tag IDs)
+MAB_PLATES = "data/mab-udi-platemap.csv"     # --plates    for twopass -k SQK-MAB*: 24 AB barcodes x 12 utags (UDI)
+
+EXAMPLES = """\
+examples:
+  utag demux   -r 'fastq_pass/**/*.fastq.gz' -c nbd -o demux_out -t 16
+  utag demux   -r fastq_pass/ -c nbd --samplesheet samples.csv
+  utag twopass -r fastq_pass/ -k SQK-NBD114-96 --samplesheet samples.csv -o twopass_out
+  utag context -r fastq_pass/                     # which -c fits these reads (+ context_report.html)
+  utag tagqc   --samplesheet samples.csv          # check tags, plate map and sample sheet
+"""
+
+INPUT_HELP = f"""\
 input file formats (defaults live in data/ next to this script):
-  --tags         data/utags-sequence.csv    no header: tag ID,sequence
+  --tags         {TAGS:<26} utag,sequence
                                             U013,CAACAGTAG
-  --plates       data/utags-platemap.csv    plate,well,utag-fwd,utag-rev
+  --plates       {PLATES:<26} plate,well,utag-fwd,utag-rev
                                             1,A1,U013,U001
                  the full 384-well design: 4 plates; column 1-12 -> U001-U012,
                  rows A-H -> U013-U020 on plate 1, U021-U028 on plate 2, ...
@@ -38,9 +59,6 @@ input file formats (defaults live in data/ next to this script):
   are reported as unexpected (--no-decoys turns that off).
   ont-barcode (e.g. NB01) is only used by twopass. See README "Input files".
 """
-import argparse, csv, glob, gzip, itertools, json, os, random, re, resource, shutil
-import subprocess, sys, time
-from collections import Counter, defaultdict
 
 ANSI = {
     "reset": "\033[0m", "bold": "\033[1m", "dim": "\033[2m",
@@ -207,9 +225,6 @@ BASE_COLOR = {"A": "green", "C": "blue", "G": "yellow", "T": "red"}
 def color_seq(seq):
     return "".join(style(c, BASE_COLOR.get(c, "gray")) for c in seq)
 
-
-PRIMER_F = "AGRGTTYGATYMTGGCTCAG"   # 27F
-PRIMER_R = "RGYTACCTTGTTACGACTT"    # 1492R
 
 # --- ONT context, taken from barbell src/kits/kits.rs (Dorado barcode_kits) ---
 NB_FRONT = "ATTGCTAAGGTTAA"   # native adapter side, precedes the NB barcode
@@ -525,8 +540,8 @@ def udi_problem(rows):
         return None
     ex = ", ".join(f"{t} ({n_tag[t]} samples)" for t in dup[:3])
     return (f"{len(dup)} tags are shared by several samples, e.g. {ex}. Only one utag is read per read, so this needs\n"
-            "unique dual indexes (each fwd and rev tag in one sample per ONT/AB barcode), e.g. --plates data/mab-udi-platemap.csv.\n"
-            "A combinatorial (CDI) plate map like data/utags-platemap.csv cannot be demultiplexed from one tag.")
+            f"unique dual indexes (each fwd and rev tag in one sample per ONT/AB barcode), e.g. --plates {MAB_PLATES}.\n"
+            f"A combinatorial (CDI) plate map like {PLATES} cannot be demultiplexed from one tag.")
 
 
 def edit_distance(a, b):
@@ -1889,120 +1904,220 @@ $("run").innerHTML = [["command", `<span class="seq">${esc(R.command)}</span>`],
 """
 
 
+_OPT_RE = re.compile(r"(?<![\w-])(--?[a-zA-Z][\w-]*)")
+_SEQ_RE = re.compile(r"\b[ACGTRYMKSWBDHVN]{12,}\b")
+_DEF_RE = re.compile(r"\((default[^()\033]*)\)")
+
+
+def _help_text(t):
+    """options green, sequences by base, (default ...) gray"""
+    t = _SEQ_RE.sub(lambda m: color_seq(m.group(0)), t)
+    t = _OPT_RE.sub(lambda m: style(m.group(1), "green"), t)
+    return _DEF_RE.sub(lambda m: style("(" + m.group(1) + ")", "gray"), t)
+
+
+def color_help(text):
+    """colour argparse help after layout (ANSI codes would break argparse's column widths)"""
+    out, sec = [], ""
+    for ln in text.split("\n"):
+        if ln.startswith("usage:"):
+            head, _, rest = ln.partition(" ")
+            prog, _, rest = rest.partition(" [")
+            out.append(style(head, "bold") + " " + style(prog, "bold") + (" [" + _OPT_RE.sub(lambda m: style(m.group(1), "green"), rest) if _ else ""))
+            sec = "usage"
+            continue
+        m = re.match(r"^(\S.*):\s*$", ln)
+        if m:
+            sec = m.group(1)
+            out.append(style(ln, "bold", "cyan"))
+            continue
+        if sec == "usage" and ln.startswith(" "):
+            out.append(_OPT_RE.sub(lambda m: style(m.group(1), "green"), ln))
+            continue
+        if sec == "subcommands":
+            m = re.match(r"^(    )(\w+)(\s{2,})(.*)$", ln)
+            if m:
+                out.append(m.group(1) + style(m.group(2), "bold", "green") + m.group(3) + m.group(4))
+                continue
+        if sec == "examples":
+            m = re.match(r"^(  )(utag)( +)(\w+)(.*?)(\s+#.*)?$", ln)
+            if m:
+                out.append(m.group(1) + style(m.group(2), "bold") + m.group(3) + style(m.group(4), "bold", "green")
+                           + m.group(5) + (style(m.group(6), "gray") if m.group(6) else ""))
+                continue
+        if sec.startswith("input file formats"):
+            m = re.match(r"^(  )(--[\w-]+)(\s+)(\S.*?)(\s{2,})(\S.*)$", ln)
+            if m:
+                out.append(m.group(1) + style(m.group(2), "green") + m.group(3) + style(m.group(4), "yellow")
+                           + m.group(5) + m.group(6))
+                continue
+            if re.match(r"^ {40,}\S", ln):                      # example rows under a format
+                out.append(style(ln, "gray"))
+                continue
+        m = re.match(r"^(  )(-\S.*?)(\s{2,}|$)(.*)$", ln)      # option line: invocation, then help
+        if m and sec not in ("examples", "subcommands") and not sec.startswith("input file formats"):
+            inv = " ".join(style(t, "green") if t.startswith("-") else style(t, "yellow")
+                           for t in m.group(2).split(" "))
+            out.append(m.group(1) + inv + m.group(3) + _help_text(m.group(4)))
+            continue
+        out.append(_help_text(ln))
+    return "\n".join(out)
+
+
+class HelpFormatter(argparse.RawDescriptionHelpFormatter):
+    def format_help(self):
+        text = super().format_help()
+        return color_help(text) if ENABLE_COLOR else text
+
+
 def main():
     here = os.path.dirname(os.path.realpath(__file__))
-    raw = argparse.RawDescriptionHelpFormatter
-    ap = argparse.ArgumentParser(description=__doc__, epilog=INPUT_HELP, formatter_class=raw)
+    width = min(112, shutil.get_terminal_size((100, 24)).columns)
+    for i, x in enumerate(sys.argv[1:], 1):          # --color also for -h (printed before the args are parsed)
+        if x == "--color" and i + 1 < len(sys.argv):
+            set_color(sys.argv[i + 1])
+        elif x.startswith("--color="):
+            set_color(x.split("=", 1)[1])
+    raw = lambda prog: HelpFormatter(prog, max_help_position=32, width=width)
+    ap = argparse.ArgumentParser(description=__doc__.format(PRIMER_F=PRIMER_F, PRIMER_R=PRIMER_R),
+                                 epilog=EXAMPLES + "\n" + INPUT_HELP, formatter_class=raw)
     sp = ap.add_subparsers(dest="cmd", required=True, title="subcommands", metavar="<subcommand>",
                           description="run 'utag.py <subcommand> -h' for its options")
 
-    def common(p):
-        p.add_argument("--color", choices=["auto", "always", "never"], default="auto",
-                       help="coloured output (default auto: only on a terminal; NO_COLOR / FORCE_COLOR are honoured)")
-        g = p.add_argument_group("input files (formats and defaults: see the end of this help)")
-        g.add_argument("--tags", metavar="CSV",
-                       help="tag sequences (default: data/utags-sequence.csv; twopass -k SQK-MAB*: data/utags-10bp-sequence.csv)")
-        g.add_argument("--plates", metavar="CSV",
-                       help="plate map: the tags in each well (default: data/utags-platemap.csv; twopass -k SQK-MAB*: data/mab-udi-platemap.csv)")
-        g.add_argument("--samplesheet", metavar="CSV|XLSX", help="your sample names and wells (without it every plate-map well is a sample)")
-        g.add_argument("--sheet-name", help="worksheet name for an .xlsx sample sheet (default: first sheet)")
-        g.add_argument("--no-decoys", action="store_true", help="with --samplesheet: do not search the plate map tags as decoys")
-        p.add_argument("--primer-f", help=f"forward primer 5'->3' (default: 16S 27F {PRIMER_F})")
-        p.add_argument("--primer-r", help=f"reverse primer 5'->3' (default: 16S 1492R {PRIMER_R})")
-        p.add_argument("--all-tags", action="store_true", help="use all tags in --tags, not just those in the plate map")
+    def sub(name, help_, fn):
+        p = sp.add_parser(name, help=help_, description=help_, epilog=INPUT_HELP, formatter_class=raw)
+        p.set_defaults(fn=fn)
+        return p
 
-    def ctx(p, default):
-        p.add_argument("--ont-barcode", help="NB01..NB96 (nbd only): add that barcode to the flank")
-        p.add_argument("--prefix", help="override: constant sequence placed directly 5' of every utag")
+    def io(p, reads=True, outdir=None, kit=False):
+        g = p.add_argument_group("input / output")
+        if reads:
+            g.add_argument("-r", "--reads", nargs="+", required=True, metavar="FASTQ",
+                           help="FASTQ files, globs or folders (searched recursively; .fastq/.fq[.gz])")
+        if kit:
+            g.add_argument("-k", "--kit", required=True, help="barbell kit, e.g. SQK-NBD114-96, SQK-NBD114-24, SQK-MAB114-24")
+        if outdir:
+            g.add_argument("-o", "--outdir", default=outdir, metavar="DIR", help=f"output folder (default {outdir})")
 
-    q = sp.add_parser("queries", epilog=INPUT_HELP, formatter_class=raw, help="write left/right query FASTAs for one or more contexts")
-    common(q); ctx(q, None)
-    q.add_argument("-o", "--outdir", default="fasta")
-    q.add_argument("-c", "--context", action="append", choices=CONTEXTS,
-                   help="context(s) to write, repeatable (default: all)")
-    q.set_defaults(fn=cmd_queries)
+    def library(p, context=None, single=None, prefix=True):
+        g = p.add_argument_group("library")
+        if context:
+            g.add_argument("-c", "--context", **context)
+        if single:
+            g.add_argument("--single-end", action="store_true", help=single)
+        if prefix:
+            g.add_argument("--ont-barcode", metavar="NBxx", help="NB01..NB96 (-c nbd only): add that barcode to the flank")
+            g.add_argument("--prefix", metavar="SEQ", help="constant sequence directly 5' of every utag (overrides -c)")
+        g.add_argument("--primer-f", metavar="SEQ", help=f"forward primer 5'->3' (default 16S 27F {PRIMER_F})")
+        g.add_argument("--primer-r", metavar="SEQ", help=f"reverse primer 5'->3' (default 16S 1492R {PRIMER_R})")
 
-    d = sp.add_parser("demux", epilog=INPUT_HELP, formatter_class=raw, help="annotate -> inspect -> filter -> trim -> split reads into samples")
-    common(d); ctx(d, "bare")
-    d.add_argument("-r", "--reads", nargs="+", required=True, help="FASTQ file(s)/globs (.fastq or .fastq.gz)")
-    d.add_argument("-o", "--outdir", default="demux_out")
-    d.add_argument("-c", "--context", choices=CONTEXTS, default="bare",
-                   help="sequence 5' of the utag: nbd, lsk, mab (end of the MAB TOPO site), or bare for reads already trimmed "
-                        "of ONT adapters (default: bare)")
-    d.add_argument("--single-end", action="store_true",
-                   help="one utag at the read start (fwd or rev) names the sample: unique dual indexes, e.g. MAB; "
-                        "the far read end is not used")
-    d.add_argument("-t", "--threads", type=int, default=10)
-    d.add_argument("--barbell", default="barbell")
-    d.add_argument("--flank-max-errors", type=int, help="relax if too many reads are missed (default: barbell decides)")
-    d.add_argument("--min-score-diff", type=float, help="min score difference between the best and second-best tag (default: barbell, 0.1); raise for fewer wrong-well calls")
-    d.add_argument("--max-offset", type=int, default=250, help="max distance of utag from read end (default 250)")
-    d.add_argument("--keep-merged", action="store_true", help="keep the decompressed/merged input FASTQ (deleted by default)")
-    d.add_argument("--flip", dest="no_flip", action="store_false", default=True,
-                   help="reverse-complement reads into forward-primer -> reverse-primer orientation")
-    d.add_argument("--gzip", action="store_true")
-    d.add_argument("--skip-trim", action="store_true",
-                   help="write untrimmed reads to samples/ (ONT adapter/barcode, utags and primers kept; barbell trim --skip-trim)")
-    d.set_defaults(fn=cmd_demux)
+    def files(p):
+        g = p.add_argument_group("input files (formats: end of this help)")
+        g.add_argument("--tags", metavar="CSV", help=f"tag sequences (default {TAGS}; twopass -k SQK-MAB*: {MAB_TAGS})")
+        g.add_argument("--plates", metavar="CSV", help=f"plate map, the tags in each well (default {PLATES}; twopass -k SQK-MAB*: {MAB_PLATES})")
+        g.add_argument("--samplesheet", metavar="CSV|XLSX", help="sample names and wells (default: every plate-map well is a sample)")
+        g.add_argument("--sheet-name", metavar="NAME", help="worksheet of an .xlsx sample sheet (default: first sheet)")
+        g.add_argument("--no-decoys", action="store_true", help="with --samplesheet: do not search the other plate-map tags as decoys")
+        g.add_argument("--all-tags", action="store_true", help="search all tags in --tags, not only those in the plate map")
 
-    t2 = sp.add_parser("twopass", epilog=INPUT_HELP, formatter_class=raw, help="barbell kit (ONT barcode) first, then utag demux inside each ONT bin")
-    common(t2)
-    t2.add_argument("-r", "--reads", nargs="+", required=True)
-    t2.add_argument("-k", "--kit", required=True, help="barbell kit name, e.g. SQK-NBD114-96, SQK-NBD114-24, SQK-MAB114-24")
-    t2.add_argument("-c", "--context", choices=CONTEXTS,
-                    help="pass 2 context 5' of the utag (default: bare, pass 1 trimmed the ONT barcode)")
-    t2.add_argument("--single-end", action="store_true",
-                    help="pass 2 uses only the utag at the read start, fwd or rev (default for SQK-MAB kits)")
-    t2.add_argument("-o", "--outdir", default="twopass_out")
-    t2.add_argument("-t", "--threads", type=int, default=10)
-    t2.add_argument("--barbell", default="barbell")
-    t2.add_argument("--no-maximize", action="store_true", help="pass 1 without --maximize")
-    t2.add_argument("--flank-max-errors", type=int, help="pass 2 (utag + primer flank) max errors (default: barbell decides)")
-    t2.add_argument("--kit-flank-max-errors", type=int,
-                    help="pass 1 (barbell kit) flank max errors (default: barbell decides, often 3). Raise to 4-5 if many "
-                         "reads end up in no ONT bin: noisy read starts (on real MAB reads 3 -> 53%%, 4 -> 71%%, 5 -> 86%% binned)")
-    t2.add_argument("--min-score-diff", type=float, help="min score difference between the best and second-best tag (default: barbell, 0.1); raise for fewer wrong-well calls")
-    t2.add_argument("--max-offset", type=int, default=250)
-    t2.add_argument("--flip", dest="no_flip", action="store_false", default=True,
-                    help="reverse-complement reads into forward-primer -> reverse-primer orientation")
-    t2.add_argument("--gzip", action="store_true")
-    t2.add_argument("--skip-trim", action="store_true",
-                    help="pass 2 does not trim: utags and primers stay on the reads in samples/ (pass 1, barbell kit, "
-                         "always removes the ONT adapter/barcode)")
-    t2.set_defaults(fn=cmd_twopass)
+    def output(p, skip_help):
+        g = p.add_argument_group("output reads")
+        g.add_argument("--flip", dest="no_flip", action="store_false", default=True,
+                       help="reverse-complement reads into forward primer -> reverse primer orientation")
+        g.add_argument("--gzip", action="store_true", help="write samples/*.fastq.gz")
+        g.add_argument("--skip-trim", action="store_true", help=skip_help)
+        return g
 
-    cx = sp.add_parser("context", epilog=INPUT_HELP, formatter_class=raw, help="find the real kit context: align the sequence upstream of the utags to the known adapters")
-    common(cx)
-    cx.add_argument("-r", "--reads", nargs="+", required=True)
-    cx.add_argument("-n", "--n-reads", type=int, default=20000,
-                    help="reads to scan, spread evenly over the input files (default 20000)")
-    cx.add_argument("--upstream", type=int, default=50, help="nt upstream of the utag to report (default 50)")
-    cx.add_argument("--max-offset", type=int, default=250, help="max distance of the utag from the read end (default 250)")
-    cx.add_argument("--exact", action="store_true",
-                    help="hit = exact utag + first 10 nt of the primer anywhere in the read (default: primer <= 2 edits "
-                         "within --max-offset of a read end, utag <= 2 edits right before it)")
-    cx.add_argument("--n-align", type=int, default=2000, help="hits per read end aligned to the known adapters (default 2000)")
-    cx.add_argument("--min-support", type=float, default=60, help="%% of hits needed per base for the consensus prefix (default 60)")
-    cx.add_argument("--html", default="context_report.html", metavar="FILE",
-                    help="also write an HTML report (default context_report.html; --html '' to skip)")
-    cx.set_defaults(fn=cmd_context)
+    def run(p, barbell=True):
+        g = p.add_argument_group("run")
+        if barbell:
+            g.add_argument("-t", "--threads", type=int, default=10, metavar="N", help="barbell threads (default 10)")
+            g.add_argument("--barbell", default="barbell", metavar="PATH", help="barbell binary (default: barbell on PATH)")
+        g.add_argument("--color", choices=["auto", "always", "never"], default="auto",
+                       help="coloured output (default auto: on a terminal only; NO_COLOR / FORCE_COLOR honoured)")
 
-    t = sp.add_parser("tagqc", epilog=INPUT_HELP, formatter_class=raw, help="check the tag set, plate map layout and sample sheet coverage")
-    common(t)
-    t.add_argument("--print", dest="print_map", choices=["columnwise", "rowwise", "plate"],
-                   help="also print every plate-map well with its tags: listed column by column (A1, B1, ..), "
+    # ---- demux
+    d = sub("demux", "annotate -> inspect -> filter -> trim -> split reads into samples", cmd_demux)
+    io(d, outdir="demux_out")
+    library(d, context=dict(choices=CONTEXTS, default="bare",
+                            help="sequence 5' of the utag: nbd, lsk, mab (end of the MAB TOPO site), or bare for reads "
+                                 "already trimmed of ONT adapters (default bare)"),
+            single="one utag at the read start (fwd or rev) names the sample: unique dual indexes, e.g. MAB; "
+                   "the far read end is not used")
+    files(d)
+    g = d.add_argument_group("matching")
+    g.add_argument("--flank-max-errors", type=int, metavar="N", help="relax if too many reads are missed (default: barbell decides)")
+    g.add_argument("--min-score-diff", type=float, metavar="F",
+                   help="min score difference between the best and second-best tag (default barbell, 0.1); raise for fewer wrong-well calls")
+    g.add_argument("--max-offset", type=int, default=250, metavar="NT", help="max distance of the utag from the read end (default 250)")
+    output(d, "write untrimmed reads to samples/: ONT adapter/barcode, utags and primers kept (barbell trim --skip-trim)") \
+        .add_argument("--keep-merged", action="store_true", help="keep the decompressed/merged input FASTQ (deleted by default)")
+    run(d)
+
+    # ---- twopass
+    t2 = sub("twopass", "barbell kit (ONT barcode) first, then utag demux inside each ONT bin", cmd_twopass)
+    io(t2, outdir="twopass_out", kit=True)
+    library(t2, context=dict(choices=CONTEXTS, help="pass 2 context 5' of the utag (default bare: pass 1 trimmed the ONT barcode)"),
+            single="pass 2 uses only the utag at the read start, fwd or rev (default for SQK-MAB kits)", prefix=False)
+    files(t2)
+    g = t2.add_argument_group("matching")
+    g.add_argument("--no-maximize", action="store_true", help="pass 1 without barbell kit --maximize")
+    g.add_argument("--kit-flank-max-errors", type=int, metavar="N",
+                   help="pass 1 (barbell kit) flank max errors (default: barbell decides, often 3). Raise to 4-5 if many "
+                        "reads end up in no ONT bin (real MAB reads: 3 -> 53%%, 4 -> 71%%, 5 -> 86%% binned)")
+    g.add_argument("--flank-max-errors", type=int, metavar="N", help="pass 2 (utag + primer flank) max errors (default: barbell decides)")
+    g.add_argument("--min-score-diff", type=float, metavar="F",
+                   help="min score difference between the best and second-best tag (default barbell, 0.1); raise for fewer wrong-well calls")
+    g.add_argument("--max-offset", type=int, default=250, metavar="NT", help="max distance of the utag from the read end (default 250)")
+    output(t2, "pass 2 does not trim: utags and primers stay on the reads in samples/ "
+               "(pass 1, barbell kit, always removes the ONT adapter/barcode)")
+    run(t2)
+
+    # ---- context
+    cx = sub("context", "find the kit context: align the sequence upstream of the utags to the known adapters", cmd_context)
+    io(cx)
+    library(cx, prefix=False)
+    files(cx)
+    g = cx.add_argument_group("scan")
+    g.add_argument("-n", "--n-reads", type=int, default=20000, metavar="N", help="reads to scan, spread evenly over the input files (default 20000)")
+    g.add_argument("--max-offset", type=int, default=250, metavar="NT", help="max distance of the utag from the read end (default 250)")
+    g.add_argument("--exact", action="store_true",
+                   help="hit = exact utag + first 10 nt of the primer anywhere in the read (default: primer <= 2 edits "
+                        "within --max-offset of a read end, utag <= 2 edits right before it)")
+    g.add_argument("--upstream", type=int, default=50, metavar="NT", help="nt upstream of the utag to report (default 50)")
+    g.add_argument("--n-align", type=int, default=2000, metavar="N", help="hits per read end aligned to the known adapters (default 2000)")
+    g.add_argument("--min-support", type=float, default=60, metavar="PCT", help="%% of hits per base for the consensus prefix (default 60)")
+    g = cx.add_argument_group("report")
+    g.add_argument("--html", default="context_report.html", metavar="FILE",
+                   help="HTML report (default context_report.html; --html '' to skip)")
+    run(cx, barbell=False)
+
+    # ---- queries
+    q = sub("queries", "write left/right query FASTAs for one or more contexts", cmd_queries)
+    io(q, reads=False, outdir="fasta")
+    library(q, context=dict(action="append", choices=CONTEXTS, help="context(s) to write, repeatable (default: all)"))
+    files(q)
+    run(q, barbell=False)
+
+    # ---- tagqc
+    t = sub("tagqc", "check the tag set, plate map layout and sample sheet coverage", cmd_tagqc)
+    files(t)
+    g = t.add_argument_group("print")
+    g.add_argument("--print", dest="print_map", choices=["columnwise", "rowwise", "plate"],
+                   help="also print every plate-map well with its tags: column by column (A1, B1, ..), "
                         "row by row (A1, A2, ..), or as a plate grid")
-    t.set_defaults(fn=cmd_tagqc)
+    library(t, prefix=False)
+    run(t, barbell=False)
 
     a = ap.parse_args()
     # defaults that depend on the library: a MAB kit is read from one tag, so it needs the unique dual index design
     mab = a.cmd == "twopass" and a.kit.upper().startswith("SQK-MAB")
     a.mab_defaults = mab and a.plates is None
     if a.plates is None:
-        a.plates = os.path.join(here, "data/mab-udi-platemap.csv" if mab else "data/utags-platemap.csv")
+        a.plates = os.path.join(here, MAB_PLATES if mab else PLATES)
     if a.tags is None:
-        udi = os.path.basename(a.plates) == "mab-udi-platemap.csv"       # its tag IDs refer to the 10 nt set
-        a.tags = os.path.join(here, "data/utags-10bp-sequence.csv" if udi else "data/utags-sequence.csv")
+        udi = os.path.basename(a.plates) == os.path.basename(MAB_PLATES)    # its tag IDs refer to MAB_TAGS
+        a.tags = os.path.join(here, MAB_TAGS if udi else TAGS)
     set_color(a.color)
     if getattr(a, "outdir", None) and a.cmd != "queries":
         start_log(a.outdir)           # everything printed is also saved to <outdir>/utag.log
