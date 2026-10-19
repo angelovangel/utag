@@ -8,8 +8,10 @@ plate-heatmap.py - plate heatmap of read counts per well, from the summary.tsv w
     plate-heatmap.py old_summary.tsv --map plate_map.csv            # summaries without plate/well columns
 
 Writes ONE self-contained HTML file (no internet, no dependencies) that shows every plate as a well grid coloured
-by read count. In the page you can paint wells into two groups (A and B) and read the total reads per group in the
-sidebar on the right.
+by read count. In the page you mark negative controls (wells that should stay empty: an unused plate, NTCs) and wells
+to exclude (not loaded, known dropouts); the sidebar shows sensitivity / specificity of calling a well at a read
+cutoff, the cutoff for 100% specificity, AUC, reads in negative wells and which utags collect them. All other wells
+are positives. The selection stays in the browser; results download as CSV.
 
 Input (tab or comma separated; extra columns are ignored):
     sample        e.g. Plate1-A1 (plate and well are read from names like Plate1-A1, P2_B12, A1)
@@ -155,14 +157,14 @@ def main():
     ap.add_argument("--palette", choices=["YlOrRd", "viridis", "cividis", "magma", "inferno", "YlGnBu", "Blues"],
                     default="YlOrRd", help="initial colour palette (default YlOrRd; cividis is safest for colour-blind viewers)")
     ap.add_argument("--per-plate", action="store_true", help="start with the colour range set per plate instead of globally")
-    ap.add_argument("--names", nargs=2, metavar=("A", "B"), default=["Group A", "Group B"], help="initial group names")
+    ap.add_argument("--cutoff", type=int, default=10, help="initial read cutoff for calling a well (default 10)")
     a = ap.parse_args()
 
     rows = read_table(a.summary)
     wells, panels, unplaced = build(rows, load_map(a.map) if a.map else {})
     out = a.output or os.path.join(os.path.dirname(os.path.abspath(a.summary)), "plates.html")
     title = a.title or (os.path.basename(os.path.dirname(os.path.abspath(a.summary))) or "plates") + " - reads per well"
-    data = dict(title=title, wells=wells, panels=panels, scale=a.scale, palette=a.palette, perPlate=a.per_plate, names=a.names)
+    data = dict(title=title, wells=wells, panels=panels, scale=a.scale, palette=a.palette, perPlate=a.per_plate, cutoff=a.cutoff)
     payload = json.dumps(data, separators=(",", ":")).replace("<", "\\u003c")
     html = TEMPLATE.replace("__TITLE__", title.replace("<", "&lt;")).replace("__DATA__", payload)
     with open(out, "w", encoding="utf-8") as fh:
@@ -188,7 +190,7 @@ TEMPLATE = r"""<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>__TITLE__</title>
 <style>
-:root{color-scheme:light;--bg:#f6f7f9;--panel:#ffffff;--panel2:#f1f3f6;--ink:#1c2230;--dim:#6b7383;--line:#dde1e7;--A:#1f6feb;--B:#7b3fe4;--accent:#1c2230;--zero:#eceef2}
+:root{color-scheme:light;--bg:#f6f7f9;--panel:#ffffff;--panel2:#f1f3f6;--ink:#1c2230;--dim:#6b7383;--line:#dde1e7;--N:#d03b3b;--X:#6b7383;--P:#2a78d6;--accent:#1c2230;--zero:#eceef2}
 *{box-sizing:border-box}
 html,body{height:100%;margin:0}
 body{background:var(--bg);color:var(--ink);font:13px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;user-select:none;-webkit-user-select:none}
@@ -218,11 +220,11 @@ main{grid-area:main;overflow:auto;padding:16px 20px 40px}
   font-variant-numeric:tabular-nums;transition:box-shadow .08s}
 .well.empty{background:transparent;border:1px dashed var(--line);cursor:default}
 .well:not(.empty):hover{box-shadow:0 0 0 2px #1c223088}
-.well.selA{box-shadow:0 0 0 2px #fff,0 0 0 4px var(--A)}
-.well.selB{box-shadow:0 0 0 2px #fff,0 0 0 4px var(--B)}
+.well.selN{box-shadow:0 0 0 2px #fff,0 0 0 4px var(--N)}
+.well.selX{opacity:.35;background-image:repeating-linear-gradient(45deg,transparent 0 3px,#fff 3px 5px)!important}
 .well[data-g]::after{content:attr(data-g);position:absolute;top:-5px;right:-5px;min-width:13px;height:13px;border-radius:7px;font-size:9px;
   line-height:13px;text-align:center;color:#fff;font-weight:800;z-index:1}
-.well.selA::after{background:var(--A)}.well.selB::after{background:var(--B)}
+.well.selN::after{background:var(--N)}.well.selX::after{background:var(--X)}
 .tiles{display:flex;flex-wrap:wrap;gap:6px}
 .well.tile{aspect-ratio:auto;border-radius:9px;padding:6px 10px;flex-direction:column;gap:2px;font-size:12px;min-width:92px}
 .tile .tn{font-weight:500;opacity:.85;font-size:11px;word-break:break-all}.tile .tv{font-weight:700}
@@ -230,6 +232,8 @@ main{grid-area:main;overflow:auto;padding:16px 20px 40px}
 aside{grid-area:side;border-left:1px solid var(--line);background:var(--panel);overflow:auto;padding:14px 16px 30px}
 aside h2{margin:14px 0 8px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--dim);font-weight:600}
 aside h2:first-child{margin-top:0}
+.sh{display:flex;align-items:center;gap:8px}.sh button{margin-left:auto;padding:2px 9px;font-size:12px;color:var(--dim);text-transform:none;letter-spacing:0;font-weight:400}
+#app.wide aside{position:fixed;top:0;right:0;bottom:0;width:50vw;min-width:350px;z-index:5;box-shadow:-10px 0 28px #1c223026;padding:16px 24px 30px}
 .modes{display:flex;gap:6px}
 .modes button{flex:1;padding:7px 4px;border-radius:8px;display:flex;align-items:center;justify-content:center;gap:6px}
 .modes button.on{border-color:var(--c);box-shadow:inset 0 0 0 1px var(--c);background:#1c22300d}
@@ -258,9 +262,17 @@ dt{color:var(--dim)}dd{margin:0;text-align:right;font-variant-numeric:tabular-nu
 .item i{width:8px;height:8px;border-radius:50%;flex:none}.item span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .item em{font-style:normal;color:var(--dim);font-variant-numeric:tabular-nums}
 .hint{color:var(--dim);font-size:11.5px;margin-top:12px;line-height:1.55}
+.res{border:1px solid var(--line);border-radius:8px;padding:6px 10px;margin-bottom:6px}
+.res dl{grid-template-columns:1fr auto}.res dd b{font-size:13px}
+.note{color:var(--dim);font-size:11.5px;line-height:1.5;margin:4px 0 6px}
+.mini{width:100%;border-collapse:collapse;font-size:11.5px;font-variant-numeric:tabular-nums}
+.mini td,.mini th{padding:2px 4px;border-bottom:1px solid var(--line);text-align:right}.mini th{color:var(--dim);font-weight:600}
+.mini td:first-child,.mini th:first-child{text-align:left}.mini button{padding:0 6px;font-size:11px}
+.strip text{fill:var(--dim);font-size:10px}
 #tip{position:fixed;z-index:9;pointer-events:none;background:#fffffff5;border:1px solid var(--line);box-shadow:0 4px 14px #1c223022;color:var(--ink);border-radius:8px;padding:7px 10px;font-size:12px;display:none;max-width:280px}
 #tip b{font-size:13px}#tip .k{color:var(--dim)}
-@media (max-width:900px){#app{grid-template-columns:1fr;grid-template-areas:"head" "main" "side";height:auto}aside{border-left:0;border-top:1px solid var(--line)}}
+@media (max-width:900px){#app{grid-template-columns:1fr;grid-template-areas:"head" "main" "side";height:auto}aside{border-left:0;border-top:1px solid var(--line)}
+  #app.wide aside{position:static;width:auto;box-shadow:none}.sh button{display:none}}
 </style>
 </head>
 <body>
@@ -286,13 +298,14 @@ dt{color:var(--dim)}dd{margin:0;text-align:right;font-variant-numeric:tabular-nu
 const D = JSON.parse(document.getElementById('data').textContent);
 const wells = D.wells, panels = D.panels;
 const byId = new Map(wells.map(w => [w.id, w]));
-const KEY = 'plate-heatmap:' + D.title + ':' + wells.length;
-const state = {mode: 'A', drag: 'box', scale: D.scale || 'log', palette: D.palette || 'YlOrRd', range: D.perPlate ? 'plate' : 'global', labels: 'compact', groups: {}, names: D.names.slice()};
+const KEY = 'plate-heatmap:neg:' + D.title + ':' + wells.length;
+// groups: N = negative control (should have no reads), X = excluded (counts nowhere); every other well is a positive
+const state = {mode: 'N', drag: 'box', scale: D.scale || 'log', palette: D.palette || 'YlOrRd', range: D.perPlate ? 'plate' : 'global', labels: 'compact', groups: {}, cutoff: D.cutoff || 10, wide: false};
 try {
   const s = JSON.parse(localStorage.getItem(KEY) || 'null');
-  if (s) { for (const [id, g] of Object.entries(s.groups || {})) if (byId.has(id)) state.groups[id] = g; if (s.names) state.names = s.names; }
+  if (s) { for (const [id, g] of Object.entries(s.groups || {})) if (byId.has(id) && (g === 'N' || g === 'X')) state.groups[id] = g; if (s.cutoff) state.cutoff = s.cutoff; }
 } catch (e) {}
-const save = () => { try { localStorage.setItem(KEY, JSON.stringify({groups: state.groups, names: state.names})); } catch (e) {} };
+const save = () => { try { localStorage.setItem(KEY, JSON.stringify({groups: state.groups, cutoff: state.cutoff})); } catch (e) {} };
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -306,8 +319,8 @@ const compact = n => {  // 950, 1.2k, 12k, 120k, 1.2M, 12M
 };
 const sum = a => a.reduce((x, y) => x + y, 0);
 const median = a => { if (!a.length) return 0; const s = a.slice().sort((x, y) => x - y), m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
-const GC = {A: 'var(--A)', B: 'var(--B)'};
-const gname = g => state.names[g === 'A' ? 0 : 1] || ('Group ' + g);
+const GC = {N: 'var(--N)', X: 'var(--X)'};
+const gname = g => g === 'N' ? 'negative' : g === 'X' ? 'excluded' : 'positive';
 
 // ---------- colour: sequential palettes only (read counts are magnitudes), low -> high
 // matplotlib (perceptually uniform; cividis also reads under colour-blindness) and ColorBrewer ramps.
@@ -351,7 +364,7 @@ function panelHTML(p) {
   const tot = sum(ws.map(w => w.reads)), pos = ws.filter(w => w.reads > 0).length;
   const stats = `${fmt(tot)} reads \u00b7 ${pos}/${ws.length} wells with reads \u00b7 median ${fmt(median(ws.map(w => w.reads)))}`;
   let h = `<section class="panel ${p.kind === 'list' ? 'plist' : p.cols > 12 ? 'p384' : 'p96'}" data-p="${p.i}"><div class="phead"><b>${esc(p.title)}</b><span class="pstats">${stats}</span>` +
-    `<span class="pbtns"><button data-act="selall">select all</button><button data-act="clr">clear</button></span></div>`;
+    `<span class="pbtns"><button data-act="selall">mark all</button><button data-act="clr">clear</button></span></div>`;
   if (p.kind === 'list') {
     h += '<div class="tiles">' + ws.map(w => `<div class="well tile" data-id="${esc(w.id)}"></div>`).join('') + '</div>';
   } else {
@@ -374,8 +387,8 @@ function decorate(el) {
   if (el.classList.contains('tile')) el.innerHTML = `<span class="tn">${esc(w.sample)}</span><span class="tv">${state.labels === 'utags' ? utags(w, '/') : state.labels === 'exact' || state.labels === 'none' ? fmt(w.reads) : compact(w.reads)}</span>`;
   else if (state.labels === 'utags') el.innerHTML = `<span class="ut">${utags(w, '<br>')}</span>`;
   else el.textContent = label(w);
-  el.classList.toggle('selA', g === 'A'); el.classList.toggle('selB', g === 'B');
-  if (g) el.dataset.g = g; else delete el.dataset.g;
+  el.classList.toggle('selN', g === 'N'); el.classList.toggle('selX', g === 'X');
+  if (g) el.dataset.g = g === 'N' ? 'N' : '\u00d7'; else delete el.dataset.g;
 }
 const decorateAll = () => document.querySelectorAll('.well[data-id]').forEach(decorate);
 const elMap = new Map(); document.querySelectorAll('.well[data-id]').forEach(e => elMap.set(e.dataset.id, e));
@@ -470,7 +483,7 @@ function tipHTML(w) {
   const rows = [['reads', `<b>${fmt(w.reads)}</b>` + (pt ? ` <span class="k">(${(100 * w.reads / pt).toFixed(2)}% of panel)</span>` : '')]];
   if (w.fwd || w.rev) rows.push(['utags', `${esc(w.fwd)} / ${esc(w.rev)}`]);
   if (w.ont) rows.push(['ONT bin', esc(w.ont)]);
-  if (g) rows.push(['group', `<span style="color:${GC[g]}">${esc(gname(g))}</span>`]);
+  rows.push(['marked', g ? `<span style="color:${GC[g]}">${gname(g)}</span>` : 'positive']);
   return `<b>${esc(w.sample)}</b>` + (w.well ? ` <span class="k">${esc(p.title)} ${w.well}</span>` : '') +
     '<div>' + rows.map(r => `<div><span class="k">${r[0]}</span> ${r[1]}</div>`).join('') + '</div>';
 }
@@ -485,69 +498,128 @@ plates.addEventListener('pointermove', e => {
 });
 plates.addEventListener('pointerleave', () => { tip.style.display = 'none'; });
 
-// ---------- sidebar
-function groupStats(g) {
-  const ws = wells.filter(w => state.groups[w.id] === g), r = ws.map(w => w.reads), t = sum(r);
-  return {ws, n: ws.length, total: t, mean: ws.length ? t / ws.length : 0, med: median(r), min: r.length ? Math.min(...r) : 0, max: r.length ? Math.max(...r) : 0, pct: allReads ? 100 * t / allReads : 0};
+// ---------- sidebar: negative controls
+function auc(pos, neg) {                    // Mann-Whitney: P(positive well > negative well), ties count half
+  const all = pos.map(v => [v, 1]).concat(neg.map(v => [v, 0])).sort((x, y) => x[0] - y[0]);
+  let rs = 0;
+  for (let i = 0; i < all.length;) { let j = i; while (j < all.length && all[j][0] === all[i][0]) j++;
+    const rank = (i + 1 + j) / 2; for (let k = i; k < j; k++) if (all[k][1]) rs += rank; i = j; }
+  return (rs - pos.length * (pos.length + 1) / 2) / (pos.length * neg.length);
 }
-function gcard(g, s) {
-  return `<div class="gcard" style="--c:${GC[g]}"><div class="gh"><input class="gname" data-g="${g}" value="${esc(gname(g))}" spellcheck="false"><span class="big">${fmt(s.total)} <small>reads \u00b7 ${s.n} well${s.n === 1 ? '' : 's'}</small></span><button data-clear="${g}" title="remove all wells from this group">clear</button></div>` +
-    `<dl><dt>mean</dt><dd>${fmt(s.mean)}</dd><dt>median</dt><dd>${fmt(s.med)}</dd><dt>range</dt><dd>${s.n ? compact(s.min) + '\u2013' + compact(s.max) : '\u2013'}</dd><dt>share</dt><dd>${s.pct.toFixed(2)}%</dd></dl></div>`;
+const callAt = (pos, neg, t) => { const tp = pos.filter(v => v >= t).length, fp = neg.filter(v => v >= t).length;
+  return {t, tp, fn: pos.length - tp, fp, tn: neg.length - fp, sens: tp / pos.length, spec: 1 - fp / neg.length}; };
+const isPos = w => !state.groups[w.id];
+function analysis() {
+  const P = wells.filter(isPos), N = wells.filter(w => state.groups[w.id] === 'N'), X = wells.filter(w => state.groups[w.id] === 'X');
+  const r = {P, N, X};
+  if (!P.length || !N.length) return r;
+  const pos = P.map(w => w.reads), neg = N.map(w => w.reads), maxNeg = Math.max(...neg);
+  const cands = [...new Set([1, maxNeg + 1, ...pos, ...neg].filter(v => v >= 1))].sort((x, y) => x - y);
+  let best = null; for (const t of cands) { const c = callAt(pos, neg, t); if (!best || c.sens + c.spec > best.sens + best.spec) best = c; }
+  Object.assign(r, {pos, neg, maxNeg, negReads: sum(neg), auc: auc(pos, neg), clean: callAt(pos, neg, maxNeg + 1), best, at: callAt(pos, neg, state.cutoff)});
+  // what the negatives can detect: utags no positive uses catch misreads of that tag only (specificity = lower bound)
+  const uf = new Set(P.map(w => w.fwd).filter(Boolean)), ur = new Set(P.map(w => w.rev).filter(Boolean));
+  if (uf.size) {
+    const fF = N.filter(w => !uf.has(w.fwd)), fR = N.filter(w => !ur.has(w.rev));
+    const kind = fF.length === N.length && !fR.length ? 'fwd' : fR.length === N.length && !fF.length ? 'rev' : !fF.length && !fR.length ? 'blank' : 'mixed';
+    const k = new Set((kind === 'fwd' ? fF.map(w => w.fwd) : fR.map(w => w.rev))).size, m = kind === 'fwd' ? uf.size : ur.size;
+    r.kind = {kind, k, m, factor: kind === 'fwd' || kind === 'rev' ? (m - 1 + k) / k : null};
+  }
+  return r;
+}
+function strip(r) {                         // reads per well, positives vs negatives, log scale, cutoff line
+  const W = Math.max(318, Math.round($('#side').clientWidth - (state.wide ? 48 : 32))), lw = 58, pw = W - lw - 8, H = state.wide ? 96 : 78, mx = Math.max(10, ...wells.map(w => w.reads));
+  const x = v => lw + pw * Math.log10(v + 1) / Math.log10(mx + 1);
+  let h = `<svg class="strip" viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="reads per well, positives and negatives">`;
+  for (const t of [0, 1, 10, 100, 1e3, 1e4, 1e5, 1e6].filter(t => t <= mx)) h += `<line x1="${x(t)}" x2="${x(t)}" y1="0" y2="${H - 14}" stroke="var(--line)"/><text x="${x(t)}" y="${H - 3}" text-anchor="middle">${compact(t)}</text>`;
+  h += `<text x="${lw - 6}" y="20" text-anchor="end">positive</text><text x="${lw - 6}" y="48" text-anchor="end">negative</text>`;
+  const dot = (ws, y0, c, rr, op) => ws.map((w, j) => `<circle cx="${x(w.reads).toFixed(1)}" cy="${(y0 + ((j * 2654435761) % 1000) / 1000 * 16).toFixed(1)}" r="${rr}" fill="${c}" fill-opacity="${op}"><title>${esc(w.sample)}: ${fmt(w.reads)}</title></circle>`).join('');
+  h += dot(r.P, 8, 'var(--P)', 2.2, .45) + dot(r.N, 36, 'var(--N)', 3, .85);
+  h += `<line x1="${x(state.cutoff - .5)}" x2="${x(state.cutoff - .5)}" y1="0" y2="${H - 14}" stroke="var(--ink)" stroke-width="1.5" stroke-dasharray="3 3"/>`;
+  return h + '</svg>';
 }
 function renderSide() {
-  const A = groupStats('A'), B = groupStats('B');
-  const ratio = A.total && B.total ? (A.total / B.total).toFixed(3) : '\u2013';
-  const act = document.activeElement && document.activeElement.classList.contains('gname') ? document.activeElement.dataset.g : null;
-  const items = ['A', 'B'].flatMap(g => groupStats(g).ws.map(w => ({g, w}))).map(({g, w}) =>
-    `<div class="item" data-rm="${esc(w.id)}" title="click to remove"><i style="background:${GC[g]}"></i><span>${esc(w.sample)}${w.ont ? ' <small style="color:var(--dim)">' + esc(w.ont) + '</small>' : ''}</span><em>${fmt(w.reads)}</em></div>`).join('');
-  $('#side').innerHTML =
-    `<h2>Select wells for</h2><div class="modes">` +
-    `<button data-mode="A" class="${state.mode === 'A' ? 'on' : ''}" style="--c:var(--A)"><span class="chip"></span>${esc(gname('A'))} <kbd>1</kbd></button>` +
-    `<button data-mode="B" class="${state.mode === 'B' ? 'on' : ''}" style="--c:var(--B)"><span class="chip"></span>${esc(gname('B'))} <kbd>2</kbd></button>` +
-    `<button data-mode="E" class="${state.mode === 'E' ? 'on' : ''}" style="--c:#d63333" title="erase"><span class="chip"></span>erase <kbd>0</kbd></button></div>` +
+  const r = analysis(), pp = v => (100 * v).toFixed(1) + '%', cut = state.cutoff;
+  const btn = (m, c, lab, k) => `<button data-mode="${m}" class="${state.mode === m ? 'on' : ''}" style="--c:${c}"><span class="chip"></span>${lab} <kbd>${k}</kbd></button>`;
+  let h = `<h2 class="sh">Mark wells as<button id="wide" title="${state.wide ? 'back to the narrow sidebar (Esc)' : 'expand the sidebar over half the page'}">${state.wide ? '\u2192 collapse' : '\u2190 expand'}</button></h2><div class="modes">${btn('N', 'var(--N)', 'negative', 'n')}${btn('X', 'var(--X)', 'exclude', 'x')}${btn('E', 'var(--P)', 'positive', 'p')}</div>` +
     `<div class="seg">drag <button data-drag="box" class="${state.drag === 'box' ? 'on' : ''}" title="drag a rectangle">box</button><button data-drag="free" class="${state.drag === 'free' ? 'on' : ''}" title="paint any wells you pass over">freehand</button></div>` +
-    `<h2>Totals</h2>${gcard('A', A)}${gcard('B', B)}` +
-    `<div class="cmp"><dl><dt>${esc(gname('A'))} / ${esc(gname('B'))}</dt><dd>${ratio}</dd><dt>${esc(gname('B'))} / ${esc(gname('A'))}</dt><dd>${A.total && B.total ? (B.total / A.total).toFixed(3) : '\u2013'}</dd>` +
-    `<dt>both groups</dt><dd>${fmt(A.total + B.total)} reads (${(A.pct + B.pct).toFixed(2)}%)</dd></dl></div>` +
-    `<h2>Add by read count</h2><div class="row"><select id="thOp"><option value="le">\u2264</option><option value="ge">\u2265</option></select><input id="thN" type="number" min="0" value="0">` +
-    `<button id="thGo">add to ${state.mode === 'E' ? 'erase' : esc(gname(state.mode))}</button></div><div class="s" style="color:var(--dim);font-size:11.5px">applies to all plates (0 = wells without reads)</div>` +
-    `<h2>Selected wells (${A.n + B.n})</h2>${items ? `<div class="list">${items}</div>` : '<div class="s" style="color:var(--dim)">none yet: click or drag over wells</div>'}` +
-    `<div class="btns" style="margin-top:10px"><button id="clrAll">clear all</button><button id="exp">export CSV</button><button id="cp">copy</button></div>` +
-    `<div class="hint">drag a box over wells (or switch to freehand) \u00b7 click a well to toggle it \u00b7 click a row or column header to select the whole line \u00b7 starting on a well already in the active group removes wells instead \u00b7 keys: <b>1</b> = A, <b>2</b> = B, <b>0</b> = erase</div>`;
-  if (act) { const inp = document.querySelector(`.gname[data-g="${act}"]`); if (inp) { inp.focus(); const l = inp.value.length; inp.setSelectionRange(l, l); } }
+    `<div class="row"><input id="selQ" placeholder="Plate4, *-H12, NB02 · Plate4 …" style="flex:1;min-width:0"><button id="selGo">mark</button></div>` +
+    `<div class="row"><select id="thOp"><option value="le">≤</option><option value="ge">≥</option></select><input id="thN" type="number" min="0" value="0"><button id="thGo">mark by reads</button></div>` +
+    `<div class="note">${r.N.length} negative · ${r.X.length} excluded · ${r.P.length} positive wells. Negative = should have no reads (unused plate, NTC, empty well); excluded = not loaded or known dropout.</div>` +
+    `<h2>Negative controls</h2><div class="row"><label style="color:var(--dim)">call a well with ≥ <input id="cut" type="number" min="1" value="${cut}" style="width:70px"> reads</label></div>`;
+  if (!r.auc && r.auc !== 0) h += `<div class="note">Mark at least one negative well${r.P.length ? '' : ' and keep some positives'} to see sensitivity and specificity.</div>`;
+  else {
+    const kt = !r.kind ? '' : r.kind.kind === 'fwd' || r.kind.kind === 'rev'
+      ? `Negatives use ${r.kind.k} ${r.kind.kind} utag(s) no positive uses: they catch ${r.kind.kind}-tag misreads only, so specificity is a lower bound. Estimated all ${r.kind.kind}-tag misassignment (× ${r.kind.factor.toFixed(2)}): <b>${(100 * r.negReads * r.kind.factor / allReads).toFixed(3)}%</b>.`
+      : r.kind.kind === 'blank' ? 'Negatives use utags that positives use too (in-design blanks): they catch errors on either tag and contamination.' : 'Negatives mix unused-tag wells and in-design blanks.';
+    h += `<div class="res"><dl><dt>sensitivity at ≥ ${fmt(cut)}</dt><dd><b>${pp(r.at.sens)}</b></dd><dt>specificity at ≥ ${fmt(cut)}</dt><dd><b>${pp(r.at.spec)}</b></dd>` +
+      `<dt>TP / FN / TN / FP</dt><dd>${r.at.tp} / ${r.at.fn} / ${r.at.tn} / ${r.at.fp}</dd></dl></div>` +
+      `<div class="res"><dl><dt>cutoff for 100% specificity</dt><dd><b>≥ ${fmt(r.clean.t)}</b></dd><dt>… sensitivity there</dt><dd>${pp(r.clean.sens)}</dd>` +
+      `<dt>best cutoff (Youden)</dt><dd>≥ ${fmt(r.best.t)} · ${pp(r.best.sens)} / ${pp(r.best.spec)}</dd><dt>AUC</dt><dd>${r.auc.toFixed(4)}</dd>` +
+      `<dt>reads in negative wells</dt><dd>${fmt(r.negReads)} (${fmt(1e6 * r.negReads / allReads)} ppm)</dd><dt>max in one negative well</dt><dd>${fmt(r.maxNeg)}</dd></dl></div>` +
+      strip(r) + (kt ? `<div class="note">${kt}</div>` : '');
+    const acc = new Map();                  // reads in negative wells per utag
+    for (const w of r.N) for (const [side, t] of [['fwd', w.fwd], ['rev', w.rev]]) if (t) acc.set(side + ' ' + t, (acc.get(side + ' ' + t) || 0) + w.reads);
+    const top = [...acc.entries()].filter(e => e[1] > 0).sort((x, y) => y[1] - x[1]).slice(0, state.wide ? 24 : 8);
+    if (top.length) h += `<h2>Reads in negatives per utag</h2><table class="mini"><tr><th>utag</th><th>reads</th><th>share</th></tr>` +
+      top.map(([t, n]) => `<tr><td>${esc(t)}</td><td>${fmt(n)}</td><td>${(100 * n / r.negReads).toFixed(0)}%</td></tr>`).join('') + '</table>';
+    const fn = r.P.filter(w => w.reads < cut).sort((x, y) => x.reads - y.reads);
+    if (fn.length) h += `<h2>Positives below the cutoff (${fn.length})</h2><div class="note">failed samples or demux misses; exclude the ones you know were not loaded or failed. <button id="fnAll">exclude all</button></div>` +
+      `<div class="list"><table class="mini">` + fn.slice(0, 200).map(w => `<tr><td>${esc(w.sample)}${w.ont ? ' <small style="color:var(--dim)">' + esc(w.ont) + '</small>' : ''}</td><td>${fmt(w.reads)}</td><td><button data-x="${esc(w.id)}">exclude</button></td></tr>`).join('') + '</table></div>';
+  }
+  h += `<div class="btns" style="margin-top:12px"><button id="clrAll">reset all to positive</button><button id="exp">download results CSV</button></div>` +
+    `<div class="hint">click a well to mark or unmark it · drag a box (or freehand) · click a row or column header for the whole line, “mark all” for a plate · starting on a well already in the active mode unmarks instead · keys: <b>n</b> negative, <b>x</b> exclude, <b>p</b> positive</div>`;
+  const act = document.activeElement && document.activeElement.id, val = act === 'selQ' ? document.activeElement.value : null;
+  $('#side').innerHTML = h;
+  if (act === 'cut') { const i = $('#cut'); i.focus(); i.setSelectionRange(i.value.length, i.value.length); }
+  if (act === 'selQ') { const i = $('#selQ'); i.value = val; i.focus(); }
+  window.__ph.analysis = r;
 }
 const side = $('#side');
+const glob = g => new RegExp('^' + g.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.') + '$', 'i');
+function markSelector() {                   // sample names, ONT/sample or panel titles; * and ? wildcards
+  const res = ($('#selQ').value || '').split(/[\s,;]+/).filter(Boolean).map(glob); if (!res.length) return;
+  wells.filter(w => res.some(re => re.test(w.sample) || re.test(panels[w.panel].title) || (w.ont && re.test(w.ont + '/' + w.sample))))
+    .forEach(w => assign(w, modeGroup())); save(); renderSide();
+}
 side.addEventListener('click', e => {
   const t = e.target;
   if (t.closest('[data-drag]')) { state.drag = t.closest('[data-drag]').dataset.drag; renderSide(); return; }
   if (t.closest('[data-mode]')) { state.mode = t.closest('[data-mode]').dataset.mode; renderSide(); return; }
-  if (t.closest('[data-clear]')) { const g = t.closest('[data-clear]').dataset.clear; wells.filter(w => state.groups[w.id] === g).forEach(w => assign(w, null)); save(); renderSide(); return; }
-  if (t.closest('[data-rm]')) { const w = byId.get(t.closest('[data-rm]').dataset.rm); assign(w, null); save(); renderSide(); return; }
+  if (t.closest('[data-x]')) { assign(byId.get(t.closest('[data-x]').dataset.x), 'X'); save(); renderSide(); return; }
+  if (t.id === 'fnAll') { wells.filter(w => isPos(w) && w.reads < state.cutoff).forEach(w => assign(w, 'X')); save(); renderSide(); return; }
+  if (t.id === 'selGo') { markSelector(); return; }
+  if (t.id === 'wide') { state.wide = !state.wide; $('#app').classList.toggle('wide', state.wide); renderSide(); return; }
   if (t.id === 'clrAll') { wells.forEach(w => assign(w, null)); save(); renderSide(); return; }
   if (t.id === 'thGo') {
     const n = +$('#thN').value, ge = $('#thOp').value === 'ge', m = modeGroup();
     wells.filter(w => ge ? w.reads >= n : w.reads <= n).forEach(w => assign(w, m)); save(); renderSide(); return;
   }
-  if (t.id === 'exp' || t.id === 'cp') {
-    const q = s => /[",\n]/.test(s) ? '"' + String(s).replace(/"/g, '""') + '"' : s;
-    const rows = [['group', 'sample', 'ont_barcode', 'panel', 'well', 'reads', 'utag_fwd', 'utag_rev']];
-    for (const g of ['A', 'B']) for (const w of groupStats(g).ws) rows.push([gname(g), w.sample, w.ont, panels[w.panel].title, w.well || '', w.reads, w.fwd, w.rev]);
-    const csv = rows.map(r => r.map(q).join(',')).join('\n') + '\n';
-    if (t.id === 'cp') { (navigator.clipboard ? navigator.clipboard.writeText(csv) : Promise.reject()).then(() => { t.textContent = 'copied'; setTimeout(() => t.textContent = 'copy', 1200); }, () => { t.textContent = 'failed'; }); return; }
-    const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([csv], {type: 'text/csv'})); a.download = 'well_groups.csv'; a.click(); URL.revokeObjectURL(a.href);
+  if (t.id === 'exp') {
+    const q = v => /[",\n]/.test(String(v)) ? '"' + String(v).replace(/"/g, '""') + '"' : v, r = analysis(), lines = [];
+    if (r.at) {
+      const pp = v => (100 * v).toFixed(2);
+      lines.push('metric,value', `positive_wells,${r.P.length}`, `negative_wells,${r.N.length}`, `excluded_wells,${r.X.length}`,
+        `cutoff,${state.cutoff}`, `sensitivity_pct,${pp(r.at.sens)}`, `specificity_pct,${pp(r.at.spec)}`, `tp,${r.at.tp}`, `fn,${r.at.fn}`, `tn,${r.at.tn}`, `fp,${r.at.fp}`,
+        `cutoff_100pct_specificity,${r.clean.t}`, `sensitivity_at_that_cutoff_pct,${pp(r.clean.sens)}`, `youden_cutoff,${r.best.t}`,
+        `youden_sensitivity_pct,${pp(r.best.sens)}`, `youden_specificity_pct,${pp(r.best.spec)}`, `auc,${r.auc.toFixed(4)}`,
+        `reads_in_negative_wells,${r.negReads}`, `negative_reads_ppm_of_all,${Math.round(1e6 * r.negReads / allReads)}`, `max_reads_in_negative_well,${r.maxNeg}`, '');
+    }
+    lines.push('state,sample,ont_barcode,panel,well,reads,utag_fwd,utag_rev');
+    for (const w of wells) lines.push([gname(state.groups[w.id]), w.sample, w.ont, panels[w.panel].title, w.well || '', w.reads, w.fwd, w.rev].map(q).join(','));
+    const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([lines.join('\n') + '\n'], {type: 'text/csv'})); a.download = 'negative_controls.csv'; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   }
 });
-side.addEventListener('input', e => {
-  if (e.target.classList.contains('gname')) { state.names[e.target.dataset.g === 'A' ? 0 : 1] = e.target.value; save(); }
-});
-side.addEventListener('change', e => { if (e.target.classList.contains('gname')) renderSide(); });
+side.addEventListener('input', e => { if (e.target.id === 'cut') { state.cutoff = Math.max(1, +e.target.value || 1); save(); renderSide(); } });
+side.addEventListener('keydown', e => { if (e.target.id === 'selQ' && e.key === 'Enter') markSelector(); });
 window.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && state.wide) { state.wide = false; $('#app').classList.remove('wide'); renderSide(); return; }
   if (/^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName) || e.ctrlKey || e.metaKey || e.altKey) return;
-  const m = {'1': 'A', '2': 'B', '0': 'E', 'e': 'E'}[e.key]; if (m) { state.mode = m; renderSide(); }
+  const m = {'n': 'N', '1': 'N', 'x': 'X', '2': 'X', 'p': 'E', '0': 'E', 'e': 'E'}[e.key.toLowerCase()]; if (m) { state.mode = m; renderSide(); }
 });
 
-legend(); decorateAll(); renderSide();
 window.__ph = {state, wells, panels};   // for debugging in the console
+legend(); decorateAll(); renderSide();
 })();
 </script>
 </body>
