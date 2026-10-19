@@ -210,13 +210,13 @@ main{grid-area:main;overflow:auto;padding:16px 20px 40px}
 .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px 14px;width:100%;justify-self:start;min-width:0}
 .panel.p96{max-width:800px}.panel.p384{grid-column:1/-1;max-width:1400px}.panel.plist{grid-column:1/-1}
 .phead{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:baseline;margin-bottom:8px}
-.phead b{font-size:14px}.pstats{color:var(--dim);font-size:12px}.pbtns{margin-left:auto;display:flex;gap:6px}
+.phead b{font-size:14px}.pstats{color:var(--dim);font-size:12px}.pstats b,.sub b{font-size:inherit;color:var(--ink);font-weight:700}.pbtns{margin-left:auto;display:flex;gap:6px}
 .pbtns button{padding:2px 8px;font-size:12px;color:var(--dim)}
 .grid{display:grid;grid-template-columns:1.7em repeat(var(--cols),minmax(0,1fr));gap:3px;container-type:inline-size}
 .hc,.hr{display:flex;align-items:center;justify-content:center;color:var(--dim);font-size:11px;cursor:pointer;border-radius:4px;min-height:1.4em}
 .hc:hover,.hr:hover{background:var(--panel2);color:var(--ink)}
 .well{position:relative;aspect-ratio:1;border-radius:2px;display:flex;align-items:center;justify-content:center;text-align:center;
-  font-size:clamp(6.5px,calc(100cqw / (var(--cols) + 1.7) * .27),15px);font-weight:800;cursor:pointer;line-height:1;overflow:visible;
+  font-size:clamp(6.5px,calc(100cqw / (var(--cols) + 1.7) * .27),15px);font-weight:600;cursor:pointer;line-height:1;overflow:visible;
   font-variant-numeric:tabular-nums;transition:box-shadow .08s}
 .well.empty{background:transparent;border:1px dashed var(--line);cursor:default}
 .well:not(.empty):hover{box-shadow:0 0 0 2px #1c223088}
@@ -264,7 +264,7 @@ dt{color:var(--dim)}dd{margin:0;text-align:right;font-variant-numeric:tabular-nu
 .hint{color:var(--dim);font-size:11.5px;margin-top:12px;line-height:1.55}
 .res{border:1px solid var(--line);border-radius:8px;padding:6px 10px;margin-bottom:6px}
 .res dl{grid-template-columns:1fr auto}.res dd b{font-size:13px}
-.note{color:var(--dim);font-size:11.5px;line-height:1.5;margin:4px 0 6px}
+.note{color:var(--dim);font-size:11.5px;line-height:1.5;margin:4px 0 6px}.note b{color:var(--ink)}
 .mini{width:100%;border-collapse:collapse;font-size:11.5px;font-variant-numeric:tabular-nums}
 .mini td,.mini th{padding:2px 4px;border-bottom:1px solid var(--line);text-align:right}.mini th{color:var(--dim);font-weight:600}
 .mini td:first-child,.mini th:first-child{text-align:left}.mini button{padding:0 6px;font-size:11px}
@@ -362,7 +362,7 @@ const utags = (w, sep) => [w.fwd, w.rev].filter(Boolean).map(esc).join(sep);
 function panelHTML(p) {
   const ws = wells.filter(w => w.panel === p.i);
   const tot = sum(ws.map(w => w.reads)), pos = ws.filter(w => w.reads > 0).length;
-  const stats = `${fmt(tot)} reads \u00b7 ${pos}/${ws.length} wells with reads \u00b7 median ${fmt(median(ws.map(w => w.reads)))}`;
+  const stats = `<b>${fmt(tot)}</b> reads \u00b7 <b>${pos}/${ws.length}</b> wells with reads \u00b7 median <b>${fmt(median(ws.map(w => w.reads)))}</b>`;
   let h = `<section class="panel ${p.kind === 'list' ? 'plist' : p.cols > 12 ? 'p384' : 'p96'}" data-p="${p.i}"><div class="phead"><b>${esc(p.title)}</b><span class="pstats">${stats}</span>` +
     `<span class="pbtns"><button data-act="selall">mark all</button><button data-act="clr">clear</button></span></div>`;
   if (p.kind === 'list') {
@@ -398,7 +398,7 @@ const panelWells = panels.map(p => wells.filter(w => w.panel === p.i));
 // ---------- header
 $('#title').textContent = D.title;
 const allReads = sum(wells.map(w => w.reads));
-$('#overall').textContent = `${fmt(allReads)} reads \u00b7 ${wells.filter(w => w.reads > 0).length}/${wells.length} wells with reads \u00b7 ${panels.length} panel${panels.length > 1 ? 's' : ''}`;
+$('#overall').innerHTML = `<b>${fmt(allReads)}</b> reads \u00b7 <b>${wells.filter(w => w.reads > 0).length}/${wells.length}</b> wells with reads \u00b7 ${panels.length} panel${panels.length > 1 ? 's' : ''}`;
 $('#palette').innerHTML = Object.keys(PALETTES).map(k => `<option>${k}</option>`).join('');
 $('#scale').value = state.scale; $('#range').value = state.range; $('#palette').value = state.palette;
 function legend() {
@@ -545,7 +545,7 @@ function renderSide() {
     `<div class="seg">drag <button data-drag="box" class="${state.drag === 'box' ? 'on' : ''}" title="drag a rectangle">box</button><button data-drag="free" class="${state.drag === 'free' ? 'on' : ''}" title="paint any wells you pass over">freehand</button></div>` +
     `<div class="row"><input id="selQ" placeholder="Plate4, *-H12, NB02 · Plate4 …" style="flex:1;min-width:0"><button id="selGo">mark</button></div>` +
     `<div class="row"><select id="thOp"><option value="le">≤</option><option value="ge">≥</option></select><input id="thN" type="number" min="0" value="0"><button id="thGo">mark by reads</button></div>` +
-    `<div class="note">${r.N.length} negative · ${r.X.length} excluded · ${r.P.length} positive wells. Negative = should have no reads (unused plate, NTC, empty well); excluded = not loaded or known dropout.</div>` +
+    `<div class="note"><b>${r.N.length}</b> negative wells (<b>${fmt(sum(r.N.map(w => w.reads)))}</b> reads) · <b>${r.X.length}</b> excluded · <b>${r.P.length}</b> positive. Negative = should have no reads (unused plate, NTC, empty well); excluded = not loaded or known dropout.</div>` +
     `<h2>Negative controls</h2><div class="row"><label style="color:var(--dim)">call a well with ≥ <input id="cut" type="number" min="1" value="${cut}" style="width:70px"> reads</label></div>`;
   if (!r.auc && r.auc !== 0) h += `<div class="note">Mark at least one negative well${r.P.length ? '' : ' and keep some positives'} to see sensitivity and specificity.</div>`;
   else {
@@ -556,7 +556,7 @@ function renderSide() {
       `<dt>TP / FN / TN / FP</dt><dd>${r.at.tp} / ${r.at.fn} / ${r.at.tn} / ${r.at.fp}</dd></dl></div>` +
       `<div class="res"><dl><dt>cutoff for 100% specificity</dt><dd><b>≥ ${fmt(r.clean.t)}</b></dd><dt>… sensitivity there</dt><dd>${pp(r.clean.sens)}</dd>` +
       `<dt>best cutoff (Youden)</dt><dd>≥ ${fmt(r.best.t)} · ${pp(r.best.sens)} / ${pp(r.best.spec)}</dd><dt>AUC</dt><dd>${r.auc.toFixed(4)}</dd>` +
-      `<dt>reads in negative wells</dt><dd>${fmt(r.negReads)} (${fmt(1e6 * r.negReads / allReads)} ppm)</dd><dt>max in one negative well</dt><dd>${fmt(r.maxNeg)}</dd></dl></div>` +
+      `<dt>reads in negative wells</dt><dd><b>${fmt(r.negReads)}</b> (${fmt(1e6 * r.negReads / allReads)} ppm)</dd><dt>max in one negative well</dt><dd>${fmt(r.maxNeg)}</dd></dl></div>` +
       strip(r) + (kt ? `<div class="note">${kt}</div>` : '');
     const acc = new Map();                  // reads in negative wells per utag
     for (const w of r.N) for (const [side, t] of [['fwd', w.fwd], ['rev', w.rev]]) if (t) acc.set(side + ' ' + t, (acc.get(side + ' ' + t) || 0) + w.reads);
