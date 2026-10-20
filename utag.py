@@ -1383,7 +1383,7 @@ def cmd_context(a):
     for w in ups:                            # the first files again; shuffle (fixed seed: same result every run)
         rnd.shuffle(ups[w])
     hit_rule = ("exact match of utag + first 10 nt of the primer, anywhere in the read (--exact)" if a.exact else
-                f"primer (first {HIT_PRIMER_NT} nt, <= {HIT_EDITS} edits) within {a.max_offset} nt of a read end, "
+                f"primer (first {HIT_PRIMER_NT} nt, <= {HIT_EDITS} edits) within {a.max_offset} nt of a read end + "
                 f"utag (<= {HIT_EDITS} edits) right before it")
     R = {"hit_rule": hit_rule, "command": " ".join(sys.argv), "started": time.strftime("%Y-%m-%d %H:%M"), "cwd": os.getcwd(),
          "reads": [rel(f) for f in reads[:5]], "n_files": len(reads), "files_used": n_used, "scanned": seen, "with_hit": dict(with_hit),
@@ -1775,7 +1775,7 @@ CONTEXT_HTML = r"""<!doctype html>
 :root{color-scheme:light;--bg:#f9f9f7;--panel:#fcfcfb;--panel2:#f1f0ec;--ink:#0b0b0b;--dim:#52514e;--muted:#898781;--grid:#e1e0d9;
   --ring:rgba(11,11,11,.10);--s1:#2a78d6;--good:#006300;--warn:#a86400;--bad:#d03b3b;
   --q0:#f1f0ec;--q1:#cde2fb;--q2:#9ec5f4;--q3:#6da7ec;--q4:#3987e5;--q5:#256abf;
-  --A:#1a9850;--C:#2a78d6;--G:#e6a100;--T:#d03b3b}
+  --A:#1a9850;--C:#2a78d6;--G:#e6a100;--T:#d03b3b;--hb:#2a78d6;--hs:#6da7ec;--he:#1baf7a;--hn:#e1e0d9}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--ink);font:13px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
 header{padding:18px 24px 12px;border-bottom:1px solid var(--grid)}h1{margin:0;font-size:19px;font-weight:650}
@@ -1785,6 +1785,19 @@ main{max-width:1280px;margin:0 auto;padding:16px 24px 48px;display:grid;gap:16px
 h2{margin:-14px -16px 12px;padding:9px 16px;background:#e7eef8;border-bottom:1px solid var(--ring);border-radius:12px 12px 0 0;
   font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:#1c3d66;font-weight:650}
 h3{margin:14px 0 6px;font-size:12.5px;font-weight:600}
+.hitsum{font-size:13px;color:var(--dim);margin-bottom:8px}.hitsum b{color:var(--ink);font-size:15px}
+#hitcols{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:16px 40px;align-items:start}
+#bcs table{width:auto}#bcs .bcbar{width:140px}#bcs td{vertical-align:middle}
+@media (max-width:1000px){#hitcols{grid-template-columns:1fr}}
+.reads{display:grid;grid-template-columns:max-content 72px 320px max-content;gap:7px 12px;align-items:center;max-width:100%}
+.reads .ends{display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-bottom:-4px}
+.rk{font-size:12.5px;color:var(--dim)}
+.read{position:relative;height:12px;background:linear-gradient(#a9a89f,#a9a89f) center/100% 4px no-repeat}
+.read .tag{position:absolute;top:0;bottom:0;width:12px;background:#d03b3b}
+.pbar{position:relative;height:14px;background:var(--panel2);border:1px solid var(--grid)}
+.pbar i{position:absolute;left:0;top:0;bottom:0;background:#2a78d6}.read .tag.l{left:0}.read .tag.r{right:0}
+.tagkey{display:inline-block;width:14px;height:9px;border-radius:0;background:#d03b3b;vertical-align:-1px}
+.rv{font-size:12.5px;white-space:nowrap}.rv b{font-weight:650}.rv em{font-style:normal;color:var(--muted);margin-left:4px}
 .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px}
 .tile{background:var(--panel2);border-radius:10px;padding:8px 12px}.tile .v{font-size:20px;font-weight:650}.tile .k{color:var(--dim);font-size:12px}
 .use{font:600 15px/1.4 ui-monospace,Menlo,monospace;background:var(--panel2);border-radius:8px;padding:8px 12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
@@ -1818,9 +1831,8 @@ details summary{cursor:pointer;color:var(--dim)}
 </style></head><body>
 <header><h1>utag context</h1><div class="sub" id="sub"></div></header>
 <main>
-  <section class="panel"><h2>Hits</h2><div class="tiles" id="tiles"></div>
-    <div class="note">hit: <span id="rule"></span><br>
-    read start: hit in the read as sequenced. read end: hit in the reverse complement; the adapter is shown reverse-complemented, in the same orientation as at the start.</div></section>
+  <section class="panel"><h2>Hits</h2><div id="hitcols"><div id="tiles"></div><div id="bcs"><h3 style="margin-top:0">ONT barcodes</h3><div class="note">No ONT barcodes detected</div></div></div>
+    <div class="note">hit: <span id="rule"></span></div></section>
   <div class="two" id="ends"></div>
   <section class="panel"><h2>Suggestion</h2><div id="verdict"></div></section>
   <section class="panel"><h2>Run</h2><dl class="kv" id="run"></dl></section>
@@ -1854,17 +1866,29 @@ if (V) {
       V.rows.map(r => `<tr><td>last ${r.n}${r.query ? ` <b>(-c ${esc(V.ctx)})</b>` : ""}</td><td class="seq">${cseq(r.seq)}</td><td>≤ ${r.edits}</td>${ends.map(w => `<td>${r[w] === undefined ? "–" : heat(r[w])}</td>`).join("")}</tr>`).join("") +
       `</table></div><div class="note">% of hits at that read end with the suffix right before the utag, within the edits shown; the -c query should be ≥ 70% at both ends</div>`;
   }
-  if (V.barcodes) vh += `<h3>ONT barcodes</h3><table style="max-width:640px"><tr><th>barcode</th><th class="l">sequence</th><th>hits</th><th></th></tr>` +
-    V.barcodes.map(([b, f, sq]) => `<tr><td>${esc(b)}</td><td class="l seq">${cseq(sq || "")}</td><td>${pf(f)}</td><td class="l">${bar(f)}</td></tr>`).join("") +
-    `</table><div class="note">of ${V.checked} hits checked; ${pf(V.unclear)} unclear</div>`;
+  if (V.barcodes && V.barcodes.length) {       // shown next to the read hits
+    $("bcs").innerHTML = `<h3 style="margin-top:0">ONT barcodes</h3><table><tr><th>barcode</th><th class="l">sequence</th><th class="l" colspan="2">hits</th></tr>` +
+      V.barcodes.map(([b, f, sq]) => `<tr><td>${esc(b)}</td><td class="l seq">${cseq(sq || "")}</td>` +
+        `<td class="l"><div class="pbar bcbar"><i style="width:${(100 * f).toFixed(2)}%"></i></div></td>` +
+        `<td class="l rv"><b>${pf(f)}</b> <em>${fmt(Math.round(f * V.checked))}</em></td></tr>`).join("") +
+      `</table><div class="note">of ${V.checked} hits at the read start checked; ${pf(V.unclear)} unclear</div>`;
+  }
 }
 $("verdict").innerHTML = vh;
 
 // ---- hits
 const W = R.with_hit, sc = Math.max(1, R.scanned);
-$("tiles").innerHTML = [["reads scanned", fmt(R.scanned), ""], ["reads with a hit", fmt(W.any || 0), pf((W.any || 0) / sc)],
-  ["hit at read start", fmt(W.start || 0), pf((W.start || 0) / sc)], ["hit at read end", fmt(W.end || 0), pf((W.end || 0) / sc)], ["hit at both ends", fmt(W.both || 0), pf((W.both || 0) / sc)]]
-  .map(([k, v, p]) => `<div class="tile"><div class="k">${k}</div><div class="v">${v} <span style="font-size:13px;color:var(--dim);font-weight:400">${p}</span></div></div>`).join("");
+// reads in four groups that add up to 100%, each drawn as a read: utag markers at the ends with a hit,
+// filled to the share of reads in that group
+{ const both = W.both || 0, st = W.start || 0, en = W.end || 0, any = W.any || 0;
+  const rows = [["both ends", both, 1, 1], ["read start only", st - both, 1, 0], ["read end only", en - both, 0, 1], ["no hit", sc - any, 0, 0]];
+  $("tiles").innerHTML = `<div class="hitsum"><b>${fmt(R.scanned)}</b> reads scanned · <b>${fmt(any)}</b> with a hit (${pf(any / sc)})</div>` +
+    `<div class="reads"><div></div><div class="ends"><span>5'</span><span>3'</span></div><div></div><div></div>` +
+    rows.map(([k, n, l, r]) => { const f = n / sc;
+      return `<div class="rk">${k}</div><div class="read">${l ? '<i class="tag l"></i>' : ""}${r ? '<i class="tag r"></i>' : ""}</div>` +
+        `<div class="pbar" title="${k}: ${fmt(n)} reads (${pf(f)})"><i style="width:${(100 * f).toFixed(2)}%"></i></div>` +
+        `<div class="rv"><b>${pf(f)}</b> <em>${fmt(n)}</em></div>`; }).join("") +
+    `</div>`; }
 
 // ---- per read end
 function logo(e, known) {                 // base frequencies per position before the utag (share of all hits)
@@ -1918,8 +1942,7 @@ $("ends").innerHTML = ["start", "end"].map(w => { const e = E[w]; if (!e) return
   const known = e.suffix ? R.known.find(k => k.ctx === e.suffix.ctx) : null;
   slot.push(`<h3>base frequency, ${e.logo.length} nt 5' of the utag</h3><div class="legend">${["A", "C", "G", "T"].map(b => `<span><i style="background:var(--${b})"></i>${b}</span>`).join("")}<span style="white-space:normal">letter height = fraction of all hits with that base</span></div>${logo(e, known)}`);
   slot.push(`<dl class="kv"><dt>consensus prefix</dt><dd class="seq">${e.prefix ? cseq(e.prefix) : "(none)"} <span style="color:var(--dim);font-family:system-ui">${e.prefix.length} nt ≥ ${R.min_support}% at the same position; indels and short read ends shorten it</span></dd>` +
-    `<dt>most common 12 nt</dt><dd class="seq">${e.top12.map(([s, n]) => `${cseq(s)} <span style="color:var(--dim)">×${fmt(n)}</span>`).join(" &nbsp; ")}` +
-    `<div style="color:var(--dim);font-family:system-ui;font-size:11.5px">- = no sequence (read starts there)</div></dd></dl>`);
+    `<dt>most common 12 nt</dt><dd class="seq">${e.top12.map(([s, n]) => `${cseq(s)} <span style="color:var(--dim)">×${fmt(n)}</span>`).join(" &nbsp; ")}</dd></dl>`);
   return out(); }).join("");
 
 // ---- run
