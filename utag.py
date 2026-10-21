@@ -1309,6 +1309,11 @@ KITS = {"SQK-NBD114": ("ligation adapter + NB front + NB barcode + NB rear", NB_
         "SQK-RAD114": ("rapid adapter + transposase flank, no barcode", None),
         "SQK-RBK114": ("(rapid adapter + RB barcode +) transposase flank", RB_SEQS),
         "SQK-LSK114": ("ligation adapter only", None)}
+# what sits 5' of the insert, 5' -> 3' (as BARCODE_LAYOUT): the kit alignment in the report
+KIT_LAYOUT = {"SQK-NBD114": BARCODE_LAYOUT["nbd"], "SQK-MAB114": BARCODE_LAYOUT["mab"], "SQK-LSK114": BARCODE_LAYOUT["lsk"],
+              "SQK-RBK114": [["rapid adapter", MAB_FRONT, len(MAB_FRONT)], ["RB barcode", None, 24],
+                             ["transposase flank", RAPID_FLANK, len(RAPID_FLANK)]],
+              "SQK-RAD114": [["rapid adapter", MAB_FRONT, len(MAB_FRONT)], ["transposase flank", RAPID_FLANK, len(RAPID_FLANK)]]}
 
 
 def locate(p, text, k):
@@ -1338,20 +1343,53 @@ def locate(p, text, k):
 
 
 def read_kit(x):
-    """(kit, read up to the end of its ONT barcode) for the start of read x; (None, None) if no kit fits"""
+    """(kit, read up to the end of its ONT barcode, read up to the insert) for the start of read x;
+    (None, None, None) if no kit fits"""
     f = {key: locate(seq, x, present_edits(len(seq))) for key, seq in KIT_ADAPTERS.items()}
     if f["nb_front"] and f["nb_rear"] and 18 <= f["nb_rear"][0] - f["nb_front"][1] <= 30:   # a 24 nt barcode fits
-        return "SQK-NBD114", x[:f["nb_rear"][0]]
+        return "SQK-NBD114", x[:f["nb_rear"][0]], x[:f["nb_rear"][1]]
     if f["topo"]:                               # distinctive; the rapid adapter before the AB barcode is often garbled
-        return "SQK-MAB114", x[:f["topo"][0]]
+        return "SQK-MAB114", x[:f["topo"][0]], x[:f["topo"][1]]
     if f["rapid_flank"]:                        # rapid adapter end right before the flank (RAD) or ~24 nt before (RBK)
         r = x[:f["rapid_flank"][0]]
         rad = suffix_edits(MAB_FRONT, r)[-1]
         rbk = min(suffix_edits(MAB_FRONT, r[:-n])[-1] for n in range(20, 29))
-        return ("SQK-RAD114", None) if rad <= rbk else ("SQK-RBK114", r)
+        return ("SQK-RAD114", None, x[:f["rapid_flank"][1]]) if rad <= rbk else ("SQK-RBK114", r, x[:f["rapid_flank"][1]])
     if f["la"]:
-        return "SQK-LSK114", None
-    return None, None
+        return "SQK-LSK114", None, x[:f["la"][1]]
+    return None, None, None
+
+
+def base_profile(L):
+    """per position of the equal-length strings L ('-' = no base): ([A, C, G, T] share of all strings, consensus
+    base or '.', % of all strings with the consensus base)"""
+    cons, supp, logo = [], [], []
+    for pos in range(len(L[0]) if L else 0):
+        c = Counter(x[pos] for x in L if x[pos] != "-")
+        logo.append([c[b] / len(L) for b in "ACGT"])
+        n = sum(c.values())
+        b, k = c.most_common(1)[0] if c else ("-", 0)
+        cons.append(b if n and k / len(L) >= 0.5 else ".")
+        supp.append(100 * k / len(L) if n else 0)
+    return logo, "".join(cons), supp
+
+
+def kit_alignment(kit, ups, barcodes):
+    """The kit's reads aligned at the start of the insert: consensus over the kit layout (terminal), and the base
+    frequencies for the report"""
+    lay = KIT_LAYOUT[kit]
+    U = min(KIT_WINDOW, sum(n for _, _, n in lay) + 10)
+    L = [u[-U:].rjust(U, "-") for u in ups]
+    logo, cons, supp = base_profile(L)
+    one = barcodes[0] if barcodes and barcodes[0][1] >= 0.8 else None     # one barcode: show its sequence
+    ref = "".join(sq or (one[2] if one else "·" * n) for _, sq, n in lay)[-U:].rjust(U)
+    print()
+    print_kv([("consensus", color_seq(cons) + "  " + style("<insert>", "bold", "magenta")),
+              ("support", "".join(style(str(min(9, int(v // 10))), pct_color(v)) for v in supp)),
+              (kit, color_seq(ref)),
+              ("", style("  ".join(f"{lab} {n}" for lab, _, n in lay) + f"; {fmt_int(len(L))} reads aligned at the insert", "gray"))],
+             indent=4)
+    return {"logo": logo, "consensus": cons, "support": supp, "layout": lay, "reads": len(L)}
 
 
 def kit_from_starts(starts):
@@ -1359,7 +1397,7 @@ def kit_from_starts(starts):
     kits, which barcodes (more starts when many barcodes show up). Returns a dict for the HTML report."""
     print_step("context: kit from the read starts (no utag hits)")
     calls = [read_kit(x) for x in starts[:KIT_SAMPLE]]
-    c = Counter(k for k, _ in calls)
+    c = Counter(k for k, _, _ in calls)
     n = max(1, len(calls))
     rows = [[k, lay, style(f"{100 * c[k] / n:5.1f}%", pct_color(100 * c[k] / n))] for k, (lay, _) in KITS.items()]
     rows.append(["none", "no known adapter in the first " + str(KIT_WINDOW) + " nt", f"{100 * c[None] / n:5.1f}%"])
@@ -1377,9 +1415,13 @@ def kit_from_starts(starts):
     seqs = KITS[kit][1]
     if seqs:                                    # which ONT barcodes sit 5' of the flank (a subsample)
         more = (read_kit(x) for x in starts[KIT_SAMPLE:])
-        bc, nc = call_barcodes(seqs, (r for k, r in itertools.chain(calls, more) if k == kit), 0)
-        top = print_barcodes(bc, nc, "reads")
+        bc, nc = call_barcodes(seqs, (r for k, r, _ in itertools.chain(calls, more) if k == kit), 0)
+        top = [(b, v) for b, v in bc.most_common() if b != "?"]
         K.update(barcodes=[[b, v / nc, seqs[b]] for b, v in top], checked=nc, unclear=bc["?"] / nc, set=list(seqs.items()))
+    K["align"] = kit_alignment(kit, [u for k, _, u in calls if k == kit], K.get("barcodes"))
+    if seqs:
+        print()
+        print_barcodes(bc, nc, "reads")
     if kit in ("SQK-RAD114", "SQK-RBK114"):
         K["verdict"] = ("rapid kit: the transposase cuts the amplicons at random, so the utags are rarely at a read end "
                         "and utag cannot demultiplex these reads; use a ligation kit (SQK-LSK114 / SQK-NBD114) on the "
@@ -1584,15 +1626,7 @@ def cmd_context(a):
                                             "within": [sum(d[n] <= m for d in D[ctx]) / len(S) for m in (0, 1, 2, 3)]})
             print_table(["suffix", "sequence  <utag>", "exact", "<=1", "<=2", "<=3 edits"], rows, "<>>>>>", indent=4)
         # 3. per-position consensus: shows sequence beyond the known adapters (unknown kits)
-        cons, supp, logo = [], [], []
-        for pos in range(U):
-            c = Counter(x[pos] for x in L if x[pos] != "-")
-            logo.append([c[b] / len(L) for b in "ACGT"])
-            n = sum(c.values())
-            b, k = c.most_common(1)[0] if c else ("-", 0)
-            cons.append(b if n and k / len(L) >= 0.5 else ".")
-            supp.append(100 * k / len(L) if n else 0)
-        cs = "".join(cons)
+        logo, cs, supp = base_profile(L)
         j = U
         while j > 0 and supp[j - 1] >= a.min_support:
             j -= 1
@@ -1998,6 +2032,9 @@ if (!V && K) {
     `<h3>kit adapters at the read start</h3><div class="scroll"><table><tr><th class="l">kit</th><th class="l">read start</th><th>reads</th></tr>` +
     K.rows.map(([k, lay, f]) => `<tr class="${k === K.kit ? "pick" : ""}"><td class="l"><b>${esc(k)}</b></td><td class="l">${esc(lay)}</td><td>${heat(f)}</td></tr>`).join("") +
     `</table></div><div class="note">first ${K.window} nt of ${fmt(K.n)} reads, known adapters within ~15% edits</div>`;
+  if (K.align) vh += `<h3>${esc(K.kit)} reads aligned at the insert</h3><div class="legend">${["A", "C", "G", "T"].map(b => `<span><i style="background:var(--${b})"></i>${b}</span>`).join("")}` +
+    `<span style="white-space:normal">letter height = fraction of the ${fmt(K.align.reads)} ${esc(K.kit)} reads with that base</span></div>` +
+    logo(K.align, {label: "kit", ctx: K.kit, layout: K.align.layout, qlen: 0}, K.barcodes || [], "insert");
   if (K.barcodes) vh += `<div id="kitbcs"></div>`;
 }
 else if (!V) vh = `<p class="verdict no">too few hits at both read ends: check --primer-f/--primer-r, the tag file and the sample sheet</p>`;
@@ -2061,14 +2098,14 @@ const W = R.with_hit, sc = Math.max(1, R.scanned);
     `</div>`; }
 
 // ---- per read end
-function logo(e, known) {                 // base frequencies per position before the utag (share of all hits)
+function logo(e, known, bcs, end = "utag") {    // base frequencies per position before the utag (share of all hits)
   const lay = known && known.layout, U = e.logo.length, cw = 12, lw = 44, H = 96, Wd = lw + U * cw + 40, top = lay ? 24 : 8, base = top + H;
   const xi = p => lw + (U - p) * cw;      // left edge of position -p (p = 1 is the base right before the utag)
   let h = `<svg viewBox="0 0 ${Wd} ${base + 58}" width="100%" role="img" aria-label="base frequencies before the utag">`;
   // kit layout (nbd / mab): constant parts and the ONT barcode as bands behind the letters
   let bcSeq = "";
   if (lay) {
-    const bcs = V && V.ctx === known.ctx && V.barcodes ? V.barcodes : [];
+    bcs = bcs || (V && V.ctx === known.ctx && V.barcodes ? V.barcodes : []);
     const bc = bcs.length && bcs[0][1] >= 0.8 ? bcs[0] : null;           // one barcode: show its sequence
     const bcLab = bc ? ` (${bc[0]})` : bcs.length > 1 ? ` (mixed: ${bcs.slice(0, 3).map(b => b[0]).join(", ")})` : "";
     let p = 0;
@@ -2084,8 +2121,8 @@ function logo(e, known) {                 // base frequencies per position befor
   for (const f of [0, .5, 1]) h += `<line x1="${lw}" x2="${lw + U * cw}" y1="${base - f * H}" y2="${base - f * H}" stroke="var(--grid)"/><text x="${lw - 4}" y="${base - f * H + 3}" text-anchor="end">${f * 100}%</text>`;
   e.logo.forEach((fr, i) => { let y = base;
     ["A", "C", "G", "T"].map((b, k) => [b, fr[k]]).sort((a, b) => a[1] - b[1]).forEach(([b, f]) => { const hh = f * H; if (hh < 1) return;
-      h += `<text transform="translate(${lw + i * cw + 0.5} ${y.toFixed(2)}) scale(${(cw - 1) / 7.2} ${(hh / 9.4).toFixed(3)})" style="font:700 13px ui-monospace,Menlo,monospace;fill:var(--${b})">${b}<title>-${U - i}: ${b} ${pf(f)}</title></text>`; y -= hh; }); });
-  h += `<text x="${lw + U * cw + 4}" y="${base - 2}" style="fill:var(--ink);font-weight:600">utag</text>`;
+      h += `<text transform="translate(${lw + i * cw + 0.5} ${y.toFixed(2)}) scale(${(cw - 2) / 7.2} ${(hh / 9.4).toFixed(3)})" style="font:400 13px ui-monospace,Menlo,monospace;fill:var(--${b})">${b}<title>-${U - i}: ${b} ${pf(f)}</title></text>`; y -= hh; }); });
+  h += `<text x="${lw + U * cw + 4}" y="${base - 2}" style="fill:var(--ink);font-weight:600">${end}</text>`;
   for (let i = 0; i < U; i += 10) h += `<text x="${lw + i * cw + cw / 2}" y="${base + 12}" text-anchor="middle">-${U - i}</text>`;
   const row = (y, lab, s, title) => { let t = `<text x="${lw - 4}" y="${y}" text-anchor="end">${lab}</text>`;
     [...s].forEach((c, i) => { const x = lw + (U - s.length + i) * cw + cw / 2; if (x < lw) return;
@@ -2095,7 +2132,7 @@ function logo(e, known) {                 // base frequencies per position befor
   if (known) {
     const q = Math.min(known.qlen || 0, U);
     if (q) h += `<rect x="${xi(q)}" y="${base + 37}" width="${q * cw}" height="15" rx="3" fill="#e7eef8"><title>-c ${esc(known.ctx)} query: last ${known.qlen} nt</title></rect>`;
-    h += row(base + 48, "-c " + known.ctx, lay ? bcSeq : known.seq, q ? "query" : "");
+    h += row(base + 48, known.label || "-c " + known.ctx, lay ? bcSeq : known.seq, q ? "query" : "");
   }
   return h + "</svg>";
 }
