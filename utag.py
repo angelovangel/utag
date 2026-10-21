@@ -242,6 +242,9 @@ LSK_ADAPTER_TAIL = LSK_ADAPTER[-22:]
 MAB_TOPO = "CCATATCCGTGTCGCCCTT"
 MAB_FRONT = "GCTTGGGTGTTTAACC"                 # end of the rapid adapter, directly 5' of the AB barcode
 MAB_PREFIX = MAB_TOPO[-6:]                     # GCCCTT: directly 5' of the utag on untrimmed reads (-c mab)
+# RAD / RBK (SQK-RAD114, SQK-RBK114): rapid adapter ... GCTTGGGTGTTTAACC [+ RB barcode] + transposase flank, then a
+# random genomic/amplicon position (Dorado RBK114 rear). RAD has no barcode between the two.
+RAPID_FLANK = "GTTTTCGCATTTATCGTGAAACGCTTTCGCGTTTTTCGTGCGCCGCTTCA"
 MAB_SEQS = {    # Dorado TP01-TP24 = barbell AB01-AB24
     "AB01": "GCACCTGGAACTTGTGCCTTCCAC", "AB02": "CCGAAATAGGTTATCTGTTGTTGT",
     "AB03": "ATCAATCGCTGGACGATGGATTAG", "AB04": "CCACCCGCTCCTGCCGGTGGGCGT",
@@ -316,6 +319,14 @@ COMP = str.maketrans("ACGTRYMKSWBDHVN", "TGCAYRKMSWVHDBN")
 
 def rc(s):
     return s.translate(COMP)[::-1]
+
+
+# RBK114 (barbell RBK01-RBK96): RB01-RB12 are the reverse complements of NB01-NB12, RB13-RB96 the NB sequences,
+# except six with their own sequence (barbell's table; seen in real RBK114-96 reads)
+RB_SEQS = {"RB" + k[2:]: rc(v) if int(k[2:]) <= 12 else v for k, v in NB_SEQS.items()}
+RB_SEQS.update({"RB26": "ACTATGCCTTTCCGTGAAACAGTT", "RB39": "TCTGCCACACACTCGTAAGTCCTT",
+                "RB40": "GTCGATACTGGACCTATCCCTTGG", "RB48": "GAGTCCGTGACAACTTCTGAAAGC",
+                "RB54": "GGGTGCCAACTACATACCAAACCT", "RB60": "GAACCCTACTTTGGACAGACACCT"})
 
 
 # ----------------------------------------------------------------- inputs --
@@ -1264,7 +1275,8 @@ KNOWN_CONTEXTS = [("lsk", "Ligation Adapter (SQK-LSK114)", LSK_ADAPTER, len(LSK_
                   ("mab", "TOPO site (SQK-MAB114)", MAB_TOPO, len(MAB_PREFIX))]
 
 
-BARCODE_SAMPLE = 150     # hits checked for the NB / AB barcode (96 alignments each)
+BARCODE_SAMPLE, BARCODE_PER, BARCODE_MAX = 150, 30, 3000  # hits checked for the ONT barcode (96 alignments each):
+                                                           # more when many barcodes show up, ~30 per barcode
 # what sits 5' of the utag for kits with an ONT barcode, 5' -> 3': [label, sequence or None (= the barcode), length]
 BARCODE_LAYOUT = {"lsk": [["Ligation Adapter", LSK_ADAPTER[:-1], len(LSK_ADAPTER) - 1], ["T", "T", 1]],   # T: 3' overhang on the dA tail
                   "nbd": [["NB front", NB_FRONT, len(NB_FRONT)], ["NB barcode", None, 24], ["NB rear", NB_REAR, len(NB_REAR)]],
@@ -1287,6 +1299,126 @@ def best_barcode(seqs, up_list, flank_len):
     return c
 
 
+KIT_WINDOW, KIT_SAMPLE = 160, 1000       # read-start nt and reads checked for the kit adapters (no utag hits)
+# adapters looked for at the read start: key -> sequence
+KIT_ADAPTERS = {"la": LSK_ADAPTER_TAIL, "nb_front": NB_FRONT, "nb_rear": NB_REAR,
+                "rapid_flank": RAPID_FLANK, "topo": MAB_TOPO}
+# kit -> (layout, barcode set or None); checked in this order, the first that fits a read wins
+KITS = {"SQK-NBD114": ("ligation adapter + NB front + NB barcode + NB rear", NB_SEQS),
+        "SQK-MAB114": ("(rapid adapter + AB barcode +) TOPO site", MAB_SEQS),
+        "SQK-RAD114": ("rapid adapter + transposase flank, no barcode", None),
+        "SQK-RBK114": ("(rapid adapter + RB barcode +) transposase flank", RB_SEQS),
+        "SQK-LSK114": ("ligation adapter only", None)}
+
+
+def locate(p, text, k):
+    """(start, end, edits) of p in text within k edits (indels allowed), or None. Exact seeds (k+1 pieces: one is
+    exact, pigeonhole) pick the candidates; a semi-global DP around each gives the end, primer_start the start."""
+    b = [i * len(p) // (k + 1) for i in range(k + 2)]
+    cands, best = sorted({m.start() - b[i] for i in range(k + 1)
+                          for m in re.finditer("(?=" + p[b[i]:b[i + 1]] + ")", text)}), None
+    done = -1
+    for c in cands:
+        if c <= done:
+            continue
+        lo, hi = max(0, c - k), min(len(text), c + len(p) + k)
+        done = c + k
+        t = text[lo:hi]
+        row = [0] * (len(t) + 1)
+        for i, x in enumerate(p, 1):
+            new = [i]
+            for j, y in enumerate(t, 1):
+                new.append(min(row[j] + 1, new[j - 1] + 1, row[j - 1] + (x != y)))
+            row = new
+        e = min(row)
+        if e <= k and (best is None or e < best[2]):
+            end = lo + row.index(e)
+            best = (lo + primer_start(p, t[:end - lo], k)[0], end, e)
+    return best
+
+
+def read_kit(x):
+    """(kit, read up to the end of its ONT barcode) for the start of read x; (None, None) if no kit fits"""
+    f = {key: locate(seq, x, present_edits(len(seq))) for key, seq in KIT_ADAPTERS.items()}
+    if f["nb_front"] and f["nb_rear"] and 18 <= f["nb_rear"][0] - f["nb_front"][1] <= 30:   # a 24 nt barcode fits
+        return "SQK-NBD114", x[:f["nb_rear"][0]]
+    if f["topo"]:                               # distinctive; the rapid adapter before the AB barcode is often garbled
+        return "SQK-MAB114", x[:f["topo"][0]]
+    if f["rapid_flank"]:                        # rapid adapter end right before the flank (RAD) or ~24 nt before (RBK)
+        r = x[:f["rapid_flank"][0]]
+        rad = suffix_edits(MAB_FRONT, r)[-1]
+        rbk = min(suffix_edits(MAB_FRONT, r[:-n])[-1] for n in range(20, 29))
+        return ("SQK-RAD114", None) if rad <= rbk else ("SQK-RBK114", r)
+    if f["la"]:
+        return "SQK-LSK114", None
+    return None, None
+
+
+def kit_from_starts(starts):
+    """No utag hits: say which ONT kit the read starts look like (the first KIT_SAMPLE starts) and, for barcoded
+    kits, which barcodes (more starts when many barcodes show up). Returns a dict for the HTML report."""
+    print_step("context: kit from the read starts (no utag hits)")
+    calls = [read_kit(x) for x in starts[:KIT_SAMPLE]]
+    c = Counter(k for k, _ in calls)
+    n = max(1, len(calls))
+    rows = [[k, lay, style(f"{100 * c[k] / n:5.1f}%", pct_color(100 * c[k] / n))] for k, (lay, _) in KITS.items()]
+    rows.append(["none", "no known adapter in the first " + str(KIT_WINDOW) + " nt", f"{100 * c[None] / n:5.1f}%"])
+    print_info(f"first {KIT_WINDOW} nt of {fmt_int(len(calls))} reads, known adapters within ~15% edits")
+    print_table(["kit", "read start", "reads"], rows, "<<>", indent=4)
+    K = {"n": len(calls), "window": KIT_WINDOW,
+         "rows": [[k, lay, c[k] / n] for k, (lay, _) in KITS.items()] + [["none", "", c[None] / n]]}
+    kit, m = max(((k, c[k]) for k in KITS), key=lambda kv: kv[1])
+    if m < 0.2 * n:
+        K["verdict"] = "no known ONT adapter at the read starts: the reads look trimmed or the kit is unknown"
+        print_note(K["verdict"])
+        return K
+    K["kit"] = kit
+    print_ok(f"read starts look like {style(kit, 'bold')} ({100 * m / n:.0f}% of reads)")
+    seqs = KITS[kit][1]
+    if seqs:                                    # which ONT barcodes sit 5' of the flank (a subsample)
+        more = (read_kit(x) for x in starts[KIT_SAMPLE:])
+        bc, nc = call_barcodes(seqs, (r for k, r in itertools.chain(calls, more) if k == kit), 0)
+        top = print_barcodes(bc, nc, "reads")
+        K.update(barcodes=[[b, v / nc, seqs[b]] for b, v in top], checked=nc, unclear=bc["?"] / nc, set=list(seqs.items()))
+    if kit in ("SQK-RAD114", "SQK-RBK114"):
+        K["verdict"] = ("rapid kit: the transposase cuts the amplicons at random, so the utags are rarely at a read end "
+                        "and utag cannot demultiplex these reads; use a ligation kit (SQK-LSK114 / SQK-NBD114) on the "
+                        "intact amplicons")
+    else:
+        K["verdict"] = "the kit adapter is there but no utag + primer: check --primer-f/--primer-r, the tag file and the sample sheet"
+    print_note(K["verdict"])
+    return K
+
+def call_barcodes(seqs, regions, flank_len):
+    """best_barcode over a sample of regions (any iterable, read lazily): BARCODE_SAMPLE first, then more until
+    there are ~BARCODE_PER per barcode found (up to BARCODE_MAX). Returns (Counter, regions checked)."""
+    it = iter(regions)
+    bc = best_barcode(seqs, list(itertools.islice(it, BARCODE_SAMPLE)), flank_len)
+    while True:
+        n = sum(bc.values())
+        want = min(BARCODE_MAX, BARCODE_PER * sum(1 for k in bc if k != "?"))
+        more = list(itertools.islice(it, want - n)) if want > n else []
+        if not more:
+            return bc, n
+        bc += best_barcode(seqs, more, flank_len)
+
+
+def print_barcodes(bc, n, what):
+    """all barcodes found, most reads first, wrapped to the terminal; returns [(barcode, reads)]"""
+    top = [(k, v) for k, v in bc.most_common() if k != "?"]
+    items = [f"{k} {100 * v / n:.1f}%" for k, v in top] or ["none identified"]
+    lines, width = [""], max(40, term_width() - 22)
+    for it in items:
+        if lines[-1] and len(lines[-1]) + len(it) + 2 > width:
+            lines[-1] += ","
+            lines.append("")
+        lines[-1] += (", " if lines[-1] else "") + it
+    print_kv([("ONT barcodes", lines[0])] + [("", ln) for ln in lines[1:]]
+             + [("", style(f"{len(top)} barcodes in {fmt_int(n)} {what} checked; "
+                           f"{100 * bc['?'] / max(1, n):.0f}% unclear", "gray"))], indent=4)
+    return top
+
+
 def cmd_context(a):
     """Read the constant sequence upstream of the utags off the reads: align it against the known kit adapters
     (indels allowed) and say which -c context fits. Read starts and read ends are reported apart: the read end
@@ -1300,6 +1432,7 @@ def cmd_context(a):
     ups = {"start": [], "end": []}           # utag + primer read 5'->3' on the read (start) or on its rc (end)
     sides = {"start": Counter(), "end": Counter()}
     with_hit = Counter()                     # reads with >= 1 hit: "start", "end", "any"
+    starts = []                              # read starts, for the kit check when there are no hits
     def scan_exact(where, x):
         for side, ids, pat in (("fwd", fwd, pf), ("rev", rev, pr)):
             for t in ids:
@@ -1339,6 +1472,7 @@ def cmd_context(a):
             sides[where][best[1]] += 1
 
     def scan(seq):
+        starts.append(seq[:KIT_WINDOW])
         before = {w: len(ups[w]) for w in ups}
         for where, x in (("start", seq), ("end", rc(seq))):
             (scan_exact if a.exact else scan_relaxed)(where, x)
@@ -1477,6 +1611,9 @@ def cmd_context(a):
                 "tens of % of all hits at that read end with that base (9 = 90-100%)", "gray"))
     if dists:
         R["verdict"] = context_verdict(dists, ups, a.n_align)
+    else:
+        rnd.shuffle(starts)
+        R["kit"] = kit_from_starts(starts)
     if a.html:
         with open(a.html, "w", encoding="utf-8") as fh:
             fh.write(CONTEXT_HTML.replace("__DATA__", json.dumps(R, separators=(",", ":")).replace("</", "<\\/")))
@@ -1542,13 +1679,10 @@ def context_verdict(dists, ups, n_align):
         return V
     # nbd / mab: which ONT barcodes are 5' of the flank (a subsample of the read starts where the flank is present)
     seqs, flank, kit = (NB_SEQS, NB_REAR, "SQK-NBD114-96") if ctx == "nbd" else (MAB_SEQS, MAB_TOPO, "SQK-MAB114-24")
-    cand = [u for u in ups[where0][:n_align] if suffix_edits(flank, u)[-1] <= present_edits(len(flank))][:BARCODE_SAMPLE]
-    bc = best_barcode(seqs, cand, len(flank))
+    cand = (u for u in ups[where0] if suffix_edits(flank, u)[-1] <= present_edits(len(flank)))
+    bc, nc = call_barcodes(seqs, cand, len(flank))
     called = sum(v for k, v in bc.items() if k != "?")
-    top = [(k, v) for k, v in bc.most_common() if k != "?"][:6]
-    print_kv([("ONT barcodes", ", ".join(f"{k} {100 * v / len(cand):.0f}%" for k, v in top) or "none identified"),
-              ("", style(f"of {len(cand)} hits checked; {100 * bc['?'] / max(1, len(cand)):.0f}% unclear", "gray"))],
-             indent=4)
+    top = print_barcodes(bc, nc, "hits")
     main = top[0] if top else None
     if ctx == "mab":
         use = f"utag twopass -k {kit}   (or utag demux -c mab --single-end)"
@@ -1557,8 +1691,8 @@ def context_verdict(dists, ups, n_align):
     elif main and q_ok:
         use = f"utag demux -c nbd --ont-barcode {main[0]}   (or plain -c nbd)"
     print_kv([("use", style(use, "bold"))], indent=4)
-    V.update(use=use, barcodes=[[k, v / max(1, len(cand)), seqs[k]] for k, v in top], checked=len(cand),
-             unclear=bc["?"] / max(1, len(cand)))
+    V.update(use=use, barcodes=[[k, v / max(1, nc), seqs[k]] for k, v in top], checked=nc, set=list(seqs.items()),
+             unclear=bc["?"] / max(1, nc))
     return V
 
 
@@ -1787,7 +1921,12 @@ h2{margin:-14px -16px 12px;padding:9px 16px;background:#e7eef8;border-bottom:1px
 h3{margin:14px 0 6px;font-size:12.5px;font-weight:600}
 .hitsum{font-size:13px;color:var(--dim);margin-bottom:8px}.hitsum b{color:var(--ink);font-size:15px}
 #hitcols{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:16px 40px;align-items:start}
-#bcs table{width:auto}#bcs .bcbar{width:140px}#bcs td{vertical-align:middle}
+#bcs table,#kitbcs table{width:auto}#bcs .bcbar,#kitbcs .bcbar{width:140px}#bcs td,#kitbcs td{vertical-align:middle}
+th.sort{cursor:pointer;user-select:none}th.sort:hover{color:var(--ink)}
+.barsw.view{display:block;margin:6px 0 0}.barsw{margin-left:12px;font:12px system-ui;color:var(--dim);font-weight:normal}
+.barsw button{font:12px system-ui;border:1px solid var(--ring);background:var(--panel);color:var(--dim);padding:1px 8px;cursor:pointer;margin-left:-1px}
+.barsw button:first-child{margin-left:6px;border-radius:6px 0 0 6px}.barsw button:last-child{border-radius:0 6px 6px 0}
+.barsw button.on{color:var(--ink);background:var(--panel2);font-weight:600}.pbar.rel i{background:#d4831a}
 @media (max-width:1000px){#hitcols{grid-template-columns:1fr}}
 .reads{display:grid;grid-template-columns:max-content 72px 320px max-content;gap:7px 12px;align-items:center;max-width:100%}
 .reads .ends{display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-bottom:-4px}
@@ -1831,7 +1970,7 @@ details summary{cursor:pointer;color:var(--dim)}
 </style></head><body>
 <header><h1>utag context</h1><div class="sub" id="sub"></div></header>
 <main>
-  <section class="panel"><h2>Hits</h2><div id="hitcols"><div id="tiles"></div><div id="bcs"><h3 style="margin-top:0">ONT barcodes</h3><div class="note">No ONT barcodes detected</div></div></div>
+  <section class="panel"><h2>Hits</h2><div id="hitcols"><div id="tiles"></div><div id="bcs"><h3 style="margin-top:0">ONT barcodes</h3><div class="note">No ONT barcodes with utags found</div></div></div>
     <div class="note">hit: <span id="rule"></span></div></section>
   <div class="two" id="ends"></div>
   <section class="panel"><h2>Suggestion</h2><div id="verdict"></div></section>
@@ -1853,7 +1992,15 @@ $("sub").textContent = `${R.started} · ${R.n_files} input file${R.n_files === 1
 // ---- suggestion
 const V = R.verdict, E = R.ends;
 let vh = "";
-if (!V) vh = `<p class="verdict no">too few hits at both read ends: check --primer-f/--primer-r, the tag file and the sample sheet</p>`;
+const K = R.kit;
+if (!V && K) {
+  vh = `<p class="verdict no">no utag hits${K.kit ? ` · read starts look like <b>${esc(K.kit)}</b>` : ""}</p><div class="note warn">${esc(K.verdict)}</div>` +
+    `<h3>kit adapters at the read start</h3><div class="scroll"><table><tr><th class="l">kit</th><th class="l">read start</th><th>reads</th></tr>` +
+    K.rows.map(([k, lay, f]) => `<tr class="${k === K.kit ? "pick" : ""}"><td class="l"><b>${esc(k)}</b></td><td class="l">${esc(lay)}</td><td>${heat(f)}</td></tr>`).join("") +
+    `</table></div><div class="note">first ${K.window} nt of ${fmt(K.n)} reads, known adapters within ~15% edits</div>`;
+  if (K.barcodes) vh += `<div id="kitbcs"></div>`;
+}
+else if (!V) vh = `<p class="verdict no">too few hits at both read ends: check --primer-f/--primer-r, the tag file and the sample sheet</p>`;
 else if (V.status === "none") vh = `<p class="verdict no">no known adapter directly 5' of the utag (best: <b>${esc(V.ctx)}</b>, ${pf(V.frac)} at the read ${esc(V.where)}): the reads look trimmed (adapter/barcode removed) or the kit is unknown</p>`;
 else vh = `<p class="verdict"><span class="ok">✓</span> <b>${esc(V.name)}</b>: the whole adapter is right before the utag in <b>${pf(V.frac)}</b> of ${fmt(V.hits)} hits at the read ${esc(V.where)} → kit context <b>-c ${esc(V.ctx)}</b></p>`;
 if (V) {
@@ -1866,15 +2013,38 @@ if (V) {
       V.rows.map(r => `<tr><td>last ${r.n}${r.query ? ` <b>(-c ${esc(V.ctx)})</b>` : ""}</td><td class="seq">${cseq(r.seq)}</td><td>≤ ${r.edits}</td>${ends.map(w => `<td>${r[w] === undefined ? "–" : heat(r[w])}</td>`).join("")}</tr>`).join("") +
       `</table></div><div class="note">% of hits at that read end with the suffix right before the utag, within the edits shown; the -c query should be ≥ 70% at both ends</div>`;
   }
-  if (V.barcodes && V.barcodes.length) {       // shown next to the read hits
-    $("bcs").innerHTML = `<h3 style="margin-top:0">ONT barcodes</h3><table><tr><th>barcode</th><th class="l">sequence</th><th class="l" colspan="2">hits</th></tr>` +
-      V.barcodes.map(([b, f, sq]) => `<tr><td>${esc(b)}</td><td class="l seq">${cseq(sq || "")}</td>` +
-        `<td class="l"><div class="pbar bcbar"><i style="width:${(100 * f).toFixed(2)}%"></i></div></td>` +
-        `<td class="l rv"><b>${pf(f)}</b> <em>${fmt(Math.round(f * V.checked))}</em></td></tr>`).join("") +
-      `</table><div class="note">of ${V.checked} hits at the read start checked; ${pf(V.unclear)} unclear</div>`;
-  }
 }
 $("verdict").innerHTML = vh;
+// ONT barcode tables, sortable by barcode or count (click the header again to reverse); top BC_TOP rows, rest on expand
+const BT = {}, BC_TOP = 6;
+// rows shown: "top" (BC_TOP most reads), "found" (all barcodes with reads) or "set" (the kit's whole set, 0 included)
+function bcTable(id, rows, checked, unit, note, set) {
+  const got = new Set(rows.map(r => r[0]));
+  BT[id] = {rows, checked, unit, note, key: "n", dir: -1, view: "top", rel: false,
+            set: rows.concat((set || []).filter(([b]) => !got.has(b)).map(([b, sq]) => [b, 0, sq]))};
+  drawBc(id);
+}
+function viewBc(id, view) { BT[id].view = view; drawBc(id); }
+function barBc(id, rel) { BT[id].rel = rel; drawBc(id); }       // bar = share of all (false) or of the top barcode (true)
+function sortBc(id, key) { const t = BT[id]; t.dir = t.key === key ? -t.dir : key === "b" ? 1 : -1; t.key = key; drawBc(id); }
+function drawBc(id) {
+  const t = BT[id], top = Math.max(...t.rows.map(r => r[1]));
+  const rows = [...(t.view === "set" ? t.set : t.rows)].sort((a, b) => t.dir * (t.key === "b" ? a[0].localeCompare(b[0], "en", {numeric: true}) : a[1] - b[1]));
+  const th = (key, label, attr) => `<th class="sort${key === "n" ? " l" : ""}"${attr} onclick="sortBc('${id}','${key}')">${label}${t.key === key ? (t.dir > 0 ? " ▲" : " ▼") : ""}</th>`;
+  const vw = (v, label) => `<button class="${t.view === v ? "on" : ""}" onclick="viewBc('${id}','${v}')">${label}</button>`;
+  const sw = (rel, label) => `<button class="${t.rel === rel ? "on" : ""}" onclick="barBc('${id}',${rel})">${label}</button>`;
+  $(id).innerHTML = `<h3 style="margin-top:${id === "bcs" ? 0 : ""}">ONT barcodes · ${rows.length}` +
+    `<span class="barsw">bar ${sw(false, "share of all")}${sw(true, "share of top")}</span></h3><table><tr>${th("b", "barcode", "")}<th class="l">sequence</th>${th("n", t.unit, ' colspan="2"')}</tr>` +
+    rows.slice(0, t.view === "top" ? BC_TOP : rows.length).map(([b, f, sq]) => `<tr><td>${esc(b)}</td><td class="l seq">${cseq(sq || "")}</td>` +
+      `<td class="l"><div class="pbar bcbar${t.rel ? " rel" : ""}"><i style="width:${(100 * (t.rel ? f / top : f)).toFixed(2)}%"></i></div></td>` +
+      `<td class="l rv"><b>${pf(f)}</b> <em>${fmt(Math.round(f * t.checked))}</em></td></tr>`).join("") +
+    `</table><div class="barsw view">show ${vw("top", "top " + BC_TOP)}${vw("found", "found (" + t.rows.length + ")")}${vw("set", "whole set (" + t.set.length + ")")}</div>` +
+    `<div class="note">${t.note}</div>`;
+}
+if (V && V.barcodes && V.barcodes.length)      // shown next to the read hits
+  bcTable("bcs", V.barcodes, V.checked, "hits", `of ${fmt(V.checked)} hits at the read start checked; ${pf(V.unclear)} unclear`, V.set);
+if (!V && K && K.barcodes)
+  bcTable("kitbcs", K.barcodes, K.checked, "reads", `of ${fmt(K.checked)} ${esc(K.kit)} reads checked; ${pf(K.unclear)} unclear`, K.set);
 
 // ---- hits
 const W = R.with_hit, sc = Math.max(1, R.scanned);

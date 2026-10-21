@@ -5,3 +5,4 @@ test
 run_comparison*
 demux*
 *.html
+__pycache__/
