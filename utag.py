@@ -1947,7 +1947,7 @@ CONTEXT_HTML = r"""<!doctype html>
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--ink);font:13px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
 header{padding:18px 24px 12px;border-bottom:1px solid var(--grid)}h1{margin:0;font-size:19px;font-weight:650}
-.sub{color:var(--dim);font-size:12px;margin-top:2px;word-break:break-all}
+.sub{color:var(--dim);font-size:12px;margin-top:2px;word-break:break-all}.sub a{color:inherit;text-decoration:underline}
 main{max-width:1280px;margin:0 auto;padding:16px 24px 48px;display:grid;gap:16px}
 .panel{background:var(--panel);border:1px solid var(--ring);border-radius:12px;padding:14px 16px 16px;min-width:0}
 h2{margin:-14px -16px 12px;padding:9px 16px;background:#e7eef8;border-bottom:1px solid var(--ring);border-radius:12px 12px 0 0;
@@ -1957,7 +1957,7 @@ h3{margin:14px 0 6px;font-size:12.5px;font-weight:600}
 #hitcols{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:16px 40px;align-items:start}
 #bcs table,#kitbcs table{width:auto}#bcs .bcbar,#kitbcs .bcbar{width:140px}#bcs td,#kitbcs td{vertical-align:middle}
 th.sort{cursor:pointer;user-select:none}th.sort:hover{color:var(--ink)}
-.barsw.view{display:block;margin:6px 0 0}.barsw{margin-left:12px;font:12px system-ui;color:var(--dim);font-weight:normal}
+.barsw{display:inline-block;margin-left:12px;font:12px system-ui;color:var(--dim);font-weight:normal}
 .barsw button{font:12px system-ui;border:1px solid var(--ring);background:var(--panel);color:var(--dim);padding:1px 8px;cursor:pointer;margin-left:-1px}
 .barsw button:first-child{margin-left:6px;border-radius:6px 0 0 6px}.barsw button:last-child{border-radius:0 6px 6px 0}
 .barsw button.on{color:var(--ink);background:var(--panel2);font-weight:600}.pbar.rel i{background:#d4831a}
@@ -2021,7 +2021,8 @@ const heat = f => { const i = f <= 0 ? 0 : Math.min(5, 1 + Math.floor(f * 5)); r
 const bar = f => `<span class="bar"><i style="width:${(100 * f).toFixed(1)}%"></i></span>`;
 const cseq = s => [...s].map(c => `<span style="color:var(--${"ACGT".includes(c) ? c : "muted"})">${esc(c)}</span>`).join("");
 $("rule").textContent = R.hit_rule;
-$("sub").textContent = `${R.started} · ${R.n_files} input file${R.n_files === 1 ? "" : "s"}: ${R.reads.join(", ")}${R.n_files > R.reads.length ? ", …" : ""}`;
+$("sub").innerHTML = `Report generated on ${esc(R.started)} by <a href="https://github.com/angelovangel/utag">utag</a> · ` +
+  `${R.n_files} input file${R.n_files === 1 ? "" : "s"}: </br>${esc(R.reads.join(", "))}${R.n_files > R.reads.length ? ", …" : ""}`;
 
 // ---- suggestion
 const V = R.verdict, E = R.ends;
@@ -2071,11 +2072,12 @@ function drawBc(id) {
   const vw = (v, label) => `<button class="${t.view === v ? "on" : ""}" onclick="viewBc('${id}','${v}')">${label}</button>`;
   const sw = (rel, label) => `<button class="${t.rel === rel ? "on" : ""}" onclick="barBc('${id}',${rel})">${label}</button>`;
   $(id).innerHTML = `<h3 style="margin-top:${id === "bcs" ? 0 : ""}">ONT barcodes · ${rows.length}` +
+    `<span class="barsw">show ${vw("top", "top " + BC_TOP)}${vw("found", "found (" + t.rows.length + ")")}${vw("set", "whole set (" + t.set.length + ")")}</span>` +
     `<span class="barsw">bar ${sw(false, "share of all")}${sw(true, "share of top")}</span></h3><table><tr>${th("b", "barcode", "")}<th class="l">sequence</th>${th("n", t.unit, ' colspan="2"')}</tr>` +
     rows.slice(0, t.view === "top" ? BC_TOP : rows.length).map(([b, f, sq]) => `<tr><td>${esc(b)}</td><td class="l seq">${cseq(sq || "")}</td>` +
       `<td class="l"><div class="pbar bcbar${t.rel ? " rel" : ""}"><i style="width:${(100 * (t.rel ? f / top : f)).toFixed(2)}%"></i></div></td>` +
       `<td class="l rv"><b>${pf(f)}</b> <em>${fmt(Math.round(f * t.checked))}</em></td></tr>`).join("") +
-    `</table><div class="barsw view">show ${vw("top", "top " + BC_TOP)}${vw("found", "found (" + t.rows.length + ")")}${vw("set", "whole set (" + t.set.length + ")")}</div>` +
+    `</table>` +
     `<div class="note">${t.note}</div>`;
 }
 if (V && V.barcodes && V.barcodes.length)      // shown next to the read hits
