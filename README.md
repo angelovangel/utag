@@ -27,6 +27,9 @@ utag twopass -r 'fastq_pass/**/*.fastq.gz' -k SQK-NBD114-96 --samplesheet sample
 # the same, when Dorado / MinKNOW already demultiplexed the ONT barcodes (fastq_pass/barcode01/ ...)
 utag twopass --dorado -r fastq_pass --samplesheet samples.csv -o twopass_out -t 16
 
+# only split by ONT barcode (barbell kit, barcode trimmed) into twopass_out/ont_bins/, no utag demux
+utag twopass --pass1-only -r 'fastq_pass/**/*.fastq.gz' -k SQK-NBD114-96 -o twopass_out -t 16
+
 # MAB unique dual indexes: 24 AB barcodes x 12 utags = 288 samples (see "MAB: unique dual indexes")
 # (-k SQK-MAB* defaults to --plates data/mab-udi-platemap.csv --tags data/utags-10bp-sequence.csv)
 utag twopass -r 'fastq_pass/**/*.fastq.gz' -k SQK-MAB114-24 --samplesheet samples.csv -o mab_out -t 16
@@ -227,7 +230,7 @@ twopass_out/
   ont_bins.tsv                  reads per ONT bin: in bin, with hit, assigned
   run_summary.csv, utag.log
   barbell/
-    pass1_kit/, pass1_kit.log   barbell kit output (reads per ONT bin; not with --dorado)
+    pass1_kit/, pass1_kit.log   barbell kit output (reads per ONT bin; not with --dorado; --pass1-only moves the bins to ont_bins/)
     dorado_bins/                --dorado: reads split by the barcode in their header (only when not in barcodeNN/ folders)
     pass2_utag/<bin>/           the demux run of each bin (its own log, summaries and barbell/ folder)
 ```

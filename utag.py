@@ -1187,11 +1187,53 @@ def dorado_pass1(a, reads, bb):
     return bins
 
 
+def pass1_only(reads, bins, out, barbell, kitdir):
+    """twopass --pass1-only: the ONT bins of barbell kit are the result. Move them to ont_bins/, count reads, summarise
+    (with barbell's top read patterns, as demux does)."""
+    dest = os.path.join(out, "ont_bins")
+    os.makedirs(dest, exist_ok=True)
+    counts = {}
+    for b, fs in bins.items():
+        counts[b] = sum(count_fastq_reads(f) for f in fs)
+        for f in fs:
+            shutil.move(f, os.path.join(dest, b + (".fastq.gz" if f.endswith(".gz") else ".fastq")))
+    n_total = sum(count_fastq_reads(f) for f in reads)
+    n_bins = sum(counts.values())
+    totals = [("total_reads", n_total), ("reads_in_ont_bins", n_bins), ("ont_bins_found", len(bins))]
+    with open(os.path.join(out, "ont_bins.tsv"), "w") as fh:
+        fh.write("ont_barcode\treads_in_bin\tpct_of_total_reads\n")
+        fh.writelines(f"{b}\t{n}\t{100 * n / max(1, n_total):.2f}\n" for b, n in counts.items())
+    with open(os.path.join(out, "run_summary.csv"), "w", newline="") as fh:
+        w = csv.writer(fh, lineterminator="\n")
+        w.writerow(["metric", "value", "pct_of_total_reads"])
+        for k, v in totals:
+            w.writerow([k, v, f"{100 * v / n_total:.2f}" if n_total and k != "ont_bins_found" else ""])
+    anno, insp = os.path.join(kitdir, "annotation.tsv"), os.path.join(out, "barbell", "pass1_inspect.txt")
+    if os.path.exists(anno):
+        print_step("pass 1 inspect (top patterns -> pass1_inspect.txt)")
+        run([barbell, "inspect", "-i", anno, "-n", "500"], insp)
+        show_patterns(insp)
+        print_info(f"{fmt_int(sum(n for n, _ in parse_patterns(insp)[1]))} reads with a pattern (share = of these)")
+    print_step("pass 1 summary")
+    print_summary(totals, n_total)
+    print()
+    rows = [[style(b, "cyan"), fmt_int(n), f"{100 * n / max(1, n_total):5.1f}%", bar(n / max(1, n_total), 18)]
+            for b, n in sorted(counts.items(), key=lambda x: -x[1])]
+    print_table(["ONT bin", "reads", "of total", ""], rows, "<>><", indent=4)
+    print()
+    report = write_run_report(out)
+    print_kv([("ONT bins", f"{rel(dest)}/<ONT bin>.fastq"), ("tables", f"{rel(os.path.join(out, 'ont_bins.tsv'))}, run_summary.csv"),
+              ("barbell files", rel(os.path.join(out, "barbell")))] + ([("report", rel(report))] if report else []))
+    print_note("pass 1 only: no utag demux; run utag demux -c bare on a bin, or twopass without --pass1-only")
+
+
 def cmd_twopass(a):
     """Pass 1: barbell kit (ONT barcode), or the bins Dorado already made (--dorado). Pass 2: barbell utag demux
     inside every ONT bin."""
     if not a.kit and not a.dorado:
         sys.exit("-k/--kit is required (or --dorado for reads already demultiplexed by Dorado / MinKNOW)")
+    if a.pass1_only and a.dorado:
+        sys.exit("--pass1-only splits the reads with barbell kit; with --dorado they are split already (barcodeNN/ folders)")
     reads = expand_reads(a.reads)
     barbell = shutil.which(a.barbell) or sys.exit(f"barbell not found ({a.barbell}); install it first")
     mab = (a.kit or "").upper().startswith("SQK-MAB")
@@ -1238,6 +1280,8 @@ def cmd_twopass(a):
                         sys.exit(f"--single-end{' (' + b + ')' if b else ''}: {err}")
     else:
         bins = barbell_pass1(a, reads, barbell, bb, kitdir)
+        if a.pass1_only:
+            return pass1_only(reads, bins, out, barbell, kitdir)
 
     # ---- pass 2: utags inside each bin
     has_ont_col = any(r["ont"] for r in rows)
@@ -2390,6 +2434,9 @@ def main():
         if kit:
             g.add_argument("-k", "--kit", help="barbell kit, e.g. SQK-NBD114-96, SQK-NBD114-24, SQK-MAB114-24 "
                                                 "(required unless --dorado; with --dorado it only sets the SQK-MAB defaults)")
+            g.add_argument("--pass1-only", action="store_true",
+                           help="only split the reads by ONT barcode (barbell kit, barcode trimmed) into <outdir>/ont_bins/; "
+                                "no utag demux")
             g.add_argument("--dorado", action="store_true",
                            help="reads already demultiplexed by Dorado / MinKNOW: the barcodeNN/ folders (or the barcode "
                                 "in each read header) are the ONT bins and barbell kit (pass 1) is skipped; unclassified "

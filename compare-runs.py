@@ -56,6 +56,7 @@ SUMMARY_RE = re.compile(rf"^ {{4}}([a-z][a-z0-9_]+)\s+{NUM}(?:\s+[\d.]+%)?\s*$")
 PATTERN_RE = re.compile(rf"^ {{4}}(\d+)\s+{NUM}\s+([\d.]+)%\s+(\S.*?)\s*$")
 FOUND_RE = re.compile(rf"^ {{4}}(.+?)\s+{NUM}\s+([\d.]+)%")
 BIN_RE = re.compile(rf"^ {{4}}(\S+)\s+{NUM}\s+{NUM}\s+{NUM}\s+([\d.]+)%\s+\S*\s+(\d+)/(\d+)\s*$")
+BIN1_RE = re.compile(rf"^ {{4}}(\S+)\s+{NUM}\s+([\d.]+)%\s+[█░]+\s*$")     # twopass --pass1-only: bin, reads, %, bar
 BIN_INFO_RE = re.compile(rf"{NUM} reads in bin, {NUM} assigned")
 TIME_RE = re.compile(r"^\s+✓ ([\d.]+)s")
 UNIQ_RE = re.compile(r"pattern \(top \d+ of (\d+)\)")
@@ -69,7 +70,7 @@ def parse_log(path):
     r = {"log": path, "started": "", "cwd": "", "command": "", "subcommand": "", "context": "", "kit": "",
          "status": "incomplete", "barbell_seconds": 0.0, "steps": {}, "warnings": [], "errors": [],
          "summary": {}, "found": {}, "patterns": {}, "unique_patterns": None, "bins": {}, "info": [], "pass2": [],
-         "pass1": None}
+         "pass1": None, "pattern_reads": None}
     step, pass2_bin = "", None
     with open(path, encoding="utf-8", errors="replace") as fh:
         lines = fh.read().splitlines()
@@ -115,11 +116,14 @@ def parse_log(path):
             continue
         if s.startswith("• "):
             r["info"].append(s[2:])
+            m = re.match(rf"• {NUM} reads with a pattern", s)      # twopass --pass1-only: the share denominator
+            if m:
+                r["pattern_reads"] = num(m.group(1))
             m = BIN_INFO_RE.search(s)
             if m and pass2_bin:
                 r["bins"].setdefault(pass2_bin, {}).update(reads=num(m.group(1)), assigned=num(m.group(2)))
             continue
-        if step.startswith("[3/6] inspect"):
+        if step.startswith(("[3/6] inspect", "pass 1 inspect")):   # demux / twopass --pass1-only patterns
             m = UNIQ_RE.search(ln)
             if m:
                 r["unique_patterns"] = int(m.group(1))
@@ -134,6 +138,16 @@ def parse_log(path):
                 if k:
                     r["found"][k] = num(m.group(2))
                 continue
+        if step == "pass 1 summary":             # twopass --pass1-only
+            r["status"] = "ok"
+            m = BIN1_RE.match(ln)
+            if m:
+                r["bins"][m.group(1)] = {"reads": num(m.group(2))}
+                continue
+            m = SUMMARY_RE.match(ln)
+            if m:
+                r["summary"][ALIAS.get(m.group(1), m.group(1))] = num(m.group(2))
+            continue
         if step in ("run summary", "two-pass summary"):
             r["status"] = "ok"
             m = BIN_RE.match(ln)
@@ -387,7 +401,7 @@ def render_html(runs, base, title, top, theme="light"):
         "foundLabels": FOUND_LABEL, "patterns": top_patterns(runs + [b for r in runs for b in r["pass2"]], top),
         "runs": [{**{k: r[k] for k in ("label", "log", "started", "cwd", "command", "subcommand", "context", "kit",
                                        "status", "steps", "warnings", "errors", "summary", "found", "patterns",
-                                       "unique_patterns", "bins", "info", "samples", "pass1")},
+                                       "unique_patterns", "bins", "info", "samples", "pass1", "pattern_reads")},
                   "barbell_seconds": round(r["barbell_seconds"], 1),
                   "pass2": [{**{k: b[k] for k in ("label", "status", "steps", "warnings", "errors", "summary", "found",
                                                   "patterns", "unique_patterns", "info")},
@@ -534,7 +548,7 @@ const hideTip = () => tip.style.display = "none";
 const SINGLE = R.length === 1;              // one run: a run summary, nothing to compare against
 if (SINGLE) document.body.classList.add("single");
 const subLine = () => SINGLE
-  ? `${R[0].subcommand || "run"}${/\s--dorado\b/.test(R[0].command) ? " --dorado" : ""}${R[0].context ? " -c " + R[0].context : ""}${R[0].kit ? " -k " + R[0].kit : ""} · started ${R[0].started} · ${R[0].log} · generated ${D.generated}`
+  ? `${R[0].subcommand || "run"}${/\s--dorado\b/.test(R[0].command) ? " --dorado" : ""}${/\s--pass1-only\b/.test(R[0].command) ? " --pass1-only" : ""}${R[0].context ? " -c " + R[0].context : ""}${R[0].kit ? " -k " + R[0].kit : ""} · started ${R[0].started} · ${R[0].log} · generated ${D.generated}`
   : `${R.length} runs · generated ${D.generated}`;
 $("sub").textContent = subLine();
 // columns of the run views: the runs, or for one twopass run "all bins" + each ONT bin (pass 2)
@@ -556,6 +570,8 @@ if (R.some(r => r.pass1)) {
     `<span class="tag">${esc(p1kind(r))}</span>${esc(r.pass1.method)}</div>` +
     (/dorado/i.test(r.pass1.method)
       ? `<div class="p1l">The reads were already split by ONT barcode when they were basecalled (Dorado / MinKNOW barcodeNN folders or read headers); utag used those bins as they are.</div>`
+      : /\s--pass1-only\b/.test(r.command)
+      ? `<div class="p1l">utag split the reads by ONT barcode with barbell kit (and trimmed the barcode) into ont_bins/; --pass1-only: no utag demux.</div>`
       : `<div class="p1l">utag split the reads by ONT barcode with barbell kit (and trimmed the barcode) before searching the utags in each bin.</div>`) +
     r.pass1.lines.map(l => `<div class="p1l ${l.startsWith("! ") ? "pw" : ""}">${esc(l.replace(/^[•!] /, ""))}</div>`).join("") + `</div>`).join("");
   const kinds = [...new Set(R.map(p1kind).filter(Boolean))];
@@ -593,16 +609,18 @@ drawMetrics();
 // ---- patterns
 const qv = ["--q0", "--q1", "--q2", "--q3", "--q4", "--q5"];
 function heat(f) { const i = f <= 0 ? 0 : Math.min(5, 1 + Math.floor(f * 5 / 0.4)); return `background:var(${qv[i]});${i >= 4 ? "color:#fff" : ""}`; }
-// a pattern as a read: grey line, a block at each end where something was found (as in utag context's report);
+// a pattern as a read: grey line, a block at each end where something was found (as in utag context's report),
+// and in the middle for @prev_left hits (a second barcode inside the read: chimeric / concatenated reads);
 // F = utag-fwd (blue), R = utag-rev (orange); filled = utag, outlined = primer-flank only; the point = strand (fw right, rc left)
 function patRead(p) {
-  const W = 104, H = 16, bw = 24, y = 2, h = 12;
+  const W = 130, H = 16, bw = 24, y = 2, h = 12;
   let svg = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(p)}"><rect x="0" y="${H / 2 - 1.5}" width="${W}" height="3" rx="1.5" fill="var(--axis)"/>`;
-  for (const part of p.split("__")) {
-    const m = /^(F|R)(tag|flank)\[(fw|rc)\b.*@(left|right)/.exec(part);
-    if (!m) continue;
+  const parts = p.split("__").map(x => /^(F|R)(tag|flank)\[(fw|rc)\b.*@(left|right|prev_left)\b/.exec(x)).filter(Boolean);
+  const mids = parts.filter(m => m[4] === "prev_left").length;
+  let j = 0;
+  for (const m of parts) {
     const [, side, kind, strand, end] = m, col = side === "F" ? "var(--s1)" : "var(--s2)";
-    const x0 = end === "left" ? 0 : W - bw, x1 = x0 + bw, t = 6;      // arrow: body + point towards the strand
+    const x0 = end === "left" ? 0 : end === "right" ? W - bw : (W - bw) / 2 + (j++ - (mids - 1) / 2) * (bw + 2), x1 = x0 + bw, t = 6;   // arrow: body + point towards the strand
     const pts = strand === "fw" ? [[x0, y], [x1 - t, y], [x1, y + h / 2], [x1 - t, y + h], [x0, y + h]]
                                 : [[x0 + t, y], [x1, y], [x1, y + h], [x0 + t, y + h], [x0, y + h / 2]];
     svg += `<polygon points="${pts.map(q => q.join(",")).join(" ")}" fill="${kind === "tag" ? col : "var(--panel)"}" stroke="${col}" stroke-width="1.5"/>` +
@@ -613,13 +631,17 @@ function patRead(p) {
 function drawPats() {
   if (!D.patterns.length) { $("patPanel").classList.add("hidden"); return; }
   const mode = $("patMode").value;
-  const tot = C.map(r => Object.values(r.found).reduce((a, b) => a + b, 0) || Object.values(r.patterns).reduce((a, b) => a + b, 0) || 1);
+  const tot = C.map(r => Object.values(r.found).reduce((a, b) => a + b, 0) || r.pattern_reads || Object.values(r.patterns).reduce((a, b) => a + b, 0) || 1);
   let h = `<tr><th>read</th><th class="pat">pattern</th>${C.map(r => `<th>${esc(r.label)}</th>`).join("")}</tr>`;
   for (const p of D.patterns) { h += `<tr><td style="line-height:0">${patRead(p)}</td><td class="pat">${esc(p)}</td>` + C.map((r, i) => { const n = r.patterns[p];
       if (n === undefined) return `<td><span class="neu">–</span></td>`; const f = n / tot[i];
       return `<td><span class="cell" style="${heat(f)}" title="${fmt(n)} reads">${mode === "share" ? pf(100 * f) : fmt(n)}</span></td>`; }).join("") + "</tr>"; }
-  $("pats").innerHTML = h + `<tr><td colspan="${C.length + 2}" class="neu" style="text-align:left;white-space:normal;font-size:11px">Only the top patterns are in a log; – = not in that run's top list. ` +
-    `Read: <b style="color:var(--s1)">F</b> utag-fwd, <b style="color:var(--s2)">R</b> utag-rev at that read end; filled = utag, outlined = primer-flank only; the point shows the strand (fw → , rc ←).</td></tr>`;
+  const kit = R.every(r => /\s--pass1-only\b/.test(r.command));   // barbell kit patterns: F / R = the ONT barcode
+  const what = kit ? ["ONT barcode with its front flank", "ONT barcode with its rear flank", "barcode", "flank"] : ["utag-fwd", "utag-rev", "utag", "primer-flank"];
+  $("pats").innerHTML = h + `<tr><td colspan="${C.length + 2}" class="neu" style="text-align:left;white-space:normal;font-size:11px">` +
+    `${kit ? "barbell kit patterns (pass 1). " : ""}Only the top patterns are in a log; – = not in that run's top list. ` +
+    `Read: <b style="color:var(--s1)">F</b> ${what[0]}, <b style="color:var(--s2)">R</b> ${what[1]} at that read end; filled = ${what[2]}, ` +
+    `outlined = ${what[3]} only; the point shows the strand (fw → , rc ←).</td></tr>`;
 }
 $("patMode").onchange = drawPats; drawPats();
 
@@ -632,12 +654,15 @@ const bins = [...binRows.keys()].sort((a, b) => a.localeCompare(b, undefined, {n
 const binOfRun = (r, k) => { const n = Object.keys(r.bins).find(b => binKey(b) === k); return n ? r.bins[n] : undefined; };
 function drawBins() {                     // one row per bin; reads, hits, assigned, assigned %, samples (per run)
   const br = R.filter(r => Object.keys(r.bins).length), multi = br.length > 1;
-  const cols = ["reads in bin", "with hit", "assigned", "assigned %", "samples with reads"];
+  const p1only = br.every(r => Object.values(r.bins).every(x => x.assigned === undefined));   // twopass --pass1-only
+  const cols = p1only ? ["reads in bin", "of total reads"] : ["reads in bin", "with hit", "assigned", "assigned %", "samples with reads"];
   let h = multi ? `<tr><th></th>${br.map(r => `<th colspan="${cols.length}" style="text-align:center;border-bottom:1px solid var(--axis)">${esc(r.label)}</th>`).join("")}</tr>` : "";
   h += `<tr><th>ONT bin</th>${br.map(() => cols.map(c => `<th>${c}</th>`).join("")).join("")}</tr>`;
   for (const b of bins) { h += `<tr><td>${esc([...binRows.get(b)].join(" · "))}</td>` + br.map(r => { const x = binOfRun(r, b);
       if (!x) return cols.map(() => `<td class="neu">–</td>`).join("");
-      const f = x.reads ? x.assigned / x.reads : null, sf = x.samples_expected ? x.samples_with_reads / x.samples_expected : null;
+      if (p1only) { const t = r.summary.total_reads, f = t ? x.reads / t : null;
+        return `<td>${fmt(x.reads)}</td><td>${f === null ? "–" : `<span class="cell" style="${shade(f)}">${pf(100 * f)}</span>`}</td>`; }
+      const f = x.reads && x.assigned !== undefined ? x.assigned / x.reads : null, sf = x.samples_expected ? x.samples_with_reads / x.samples_expected : null;
       return `<td>${fmt(x.reads)}</td><td>${fmt(x.with_hit)}</td><td>${fmt(x.assigned)}</td>` +
         `<td>${f === null ? "–" : `<span class="cell" style="${shade(f)}">${pf(100 * f)}</span>`}</td>` +
         `<td>${x.samples_with_reads === undefined ? "–" : `<span class="cell" style="${sf === null ? "" : shade(sf)}">${fmt(x.samples_with_reads)} / ${fmt(x.samples_expected)}</span>`}</td>`; }).join("") + "</tr>"; }
