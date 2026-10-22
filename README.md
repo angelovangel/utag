@@ -24,6 +24,9 @@ utag demux -r 'fastq_pass/**/*.fastq.gz' -c nbd --samplesheet samples.csv -o dem
 # ONT barcodes also split the pool: ONT barcode first, then utags inside each bin
 utag twopass -r 'fastq_pass/**/*.fastq.gz' -k SQK-NBD114-96 --samplesheet samples.csv -o twopass_out -t 16
 
+# the same, when Dorado / MinKNOW already demultiplexed the ONT barcodes (fastq_pass/barcode01/ ...)
+utag twopass --dorado -r fastq_pass --samplesheet samples.csv -o twopass_out -t 16
+
 # MAB unique dual indexes: 24 AB barcodes x 12 utags = 288 samples (see "MAB: unique dual indexes")
 # (-k SQK-MAB* defaults to --plates data/mab-udi-platemap.csv --tags data/utags-10bp-sequence.csv)
 utag twopass -r 'fastq_pass/**/*.fastq.gz' -k SQK-MAB114-24 --samplesheet samples.csv -o mab_out -t 16
@@ -52,6 +55,11 @@ The "context" is the constant sequence directly 5' of the utag, which barbell us
 * **`demux`**: utags are the only sample identifier (no ONT barcodes, or after demux on ONT barcodes with e.g. dorado or barbell).
 * **`twopass`**: several ONT barcodes in one run (e.g. NB01-NB04). Pass 1 `barbell kit` splits by ONT barcode and trims it;
   pass 2 runs `demux -c bare` inside each bin, so the same utag pair can be reused in different bins.
+* **`twopass --dorado`**: the usual case, reads already basecalled and demultiplexed by Dorado / MinKNOW into
+  `barcodeNN/` folders. Those folders are the ONT bins (pass 1 is skipped); reads outside such folders are binned by the
+  barcode in their header (`al:Z:barcode01`, `RG:Z:..._barcode01` or `barcode=barcode01`). `unclassified/` is left out.
+  Pass 2 detects whether Dorado trimmed the barcode: untrimmed NBD reads (the MinKNOW default) get `-c nbd`, trimmed
+  reads `-c bare`; `-c` overrides. In the sample sheet, `ont-barcode` `NB01`, `barcode01` and `01` are the same bin.
 * Don't use `-c nbd` for LSK libraries. MAB kits can't use a tag *pair* (the utag at the
   read end is low quality/trimmed); use them as unique dual indexes, see below.
 * If unsure what is really upstream of your utag, run `utag context` (see Troubleshooting) and pass its suggestion as `--prefix`.
@@ -219,7 +227,8 @@ twopass_out/
   ont_bins.tsv                  reads per ONT bin: in bin, with hit, assigned
   run_summary.csv, utag.log
   barbell/
-    pass1_kit/, pass1_kit.log   barbell kit output (reads per ONT bin)
+    pass1_kit/, pass1_kit.log   barbell kit output (reads per ONT bin; not with --dorado)
+    dorado_bins/                --dorado: reads split by the barcode in their header (only when not in barcodeNN/ folders)
     pass2_utag/<bin>/           the demux run of each bin (its own log, summaries and barbell/ folder)
 ```
 

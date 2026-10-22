@@ -4,12 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>utag read layouts</title>
-<meta name="description" content="Read layouts and barbell search flanks for every utag context: bare, nbd, lsk, mab, and twopass.">
+<meta name="description" content="ONT kit sequences upstream of the insert, and read layouts and barbell search flanks for every utag context: bare, nbd, lsk, mab, and twopass.">
 <style>
 :root {
   color-scheme: light;
   --bg: #fbfaf8; --fg: #1d1d1b; --muted: #6b6a66; --line: #e4e1da; --card: #ffffff;
-  --adapter: #8a867d; --ont: #7a4fc9; --const: #b07a00; --utag: #1f6fb2; --utagr: #c8402f;
+  --adapter: #8a867d; --common: #3f3d39; --ont: #7a4fc9; --const: #b07a00; --utag: #1f6fb2; --utagr: #c8402f;
   --primer: #22884a; --insert: #b5b1a8;
   --span-search: #1f6fb2; --span-p1: #7a4fc9; --span-p2: #22884a; --span-alt: #b4690e;
 }
@@ -53,6 +53,7 @@ section.card {
   padding: 1px 2px 3px; border-bottom: 7px solid currentColor; font-weight: 600;
 }
 .adapter { color: var(--adapter); }
+.common { color: var(--common); }
 .ont { color: var(--ont); }
 .const { color: var(--const); }
 .utag { color: var(--utag); }
@@ -80,6 +81,15 @@ table { border-collapse: collapse; width: 100%; font-size: 13.5px; margin-top: 8
 th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
 th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
 .tablewrap { overflow-x: auto; }
+.kits { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 10px 14px; align-items: end; margin-top: 8px; }
+.kits .kit { font-size: 13px; font-weight: 600; padding-bottom: 6px; white-space: nowrap; }
+.kits .kit small { display: block; font-weight: 400; color: var(--muted); font-size: 11.5px; }
+.kits .scroll { margin: 0; }
+.kits .scheme { width: max-content; margin-left: auto; }   /* rows end at the insert, so the kits line up there; scroll when narrow */
+.kits .seq { position: relative; padding-left: 1px; padding-right: 1px; }
+.kits .seq ~ .seq:not(.insert)::after {            /* thin line where two segments meet */
+  content: ""; position: absolute; left: -1px; bottom: -7px; width: 2px; height: 7px; background: var(--fg);
+}
 footer { color: var(--muted); font-size: 13px; margin-top: 28px; }
 </style>
 </head>
@@ -89,14 +99,27 @@ footer { color: var(--muted); font-size: 13px; margin-top: 28px; }
   <nav id="toc"></nav>
 
   <div class="legend">
+    <span><i style="background:var(--common)"></i>shared adapter start</span>
     <span><i style="background:var(--adapter)"></i>ONT adapter</span>
-    <span><i style="background:var(--ont)"></i>ONT barcode (NB / AB)</span>
+    <span><i style="background:var(--ont)"></i>ONT barcode (NB / RB / AB)</span>
     <span><i style="background:var(--const)"></i>constant context</span>
     <span><i style="background:var(--utag)"></i>utag-fwd</span>
     <span><i style="background:var(--utagr)"></i>utag-rev</span>
     <span><i style="background:var(--primer)"></i>primer</span>
     <span><i style="background:var(--insert)"></i>insert</span>
   </div>
+
+  <section class="card" id="kits">
+    <h2>ONT kits — sequence 5′ of the insert</h2>
+    <div class="kits" id="kitrows"></div>
+    <ul class="notes">
+      <li>All kits share the start of the sequencing adapter, <code>CCTGTACTTCGTTCAGTT</code>. Ligation kits continue with <code>ACGTATTGCT</code>
+        (the Ligation Adapter in the ONT protocols); the rapid adapter continues with a 5–11 nt stretch that basecalls variably
+        (most often <code>ATGCAAAA</code>), then <code>GCTTGGGTGTTTAACC</code>.</li>
+      <li>Rapid kits (RAD / RBK) cut the amplicons at random with a transposase, so the utags are rarely at a read end; utag needs a ligation kit (LSK / NBD) or MAB.</li>
+      <li><code>utag context</code> names the kit from these sequences, and its ONT barcodes, when no utag is found.</li>
+    </ul>
+  </section>
 
   <div id="schemes"></div>
 
@@ -130,6 +153,21 @@ const LSK = [["adapter", "LA", "CCTGTA"], ["adapter", "Ligation Adapter, last 22
 const MAB = [["adapter", "adapter", "…"], ["const", "flank", "TTTAACC"], ["ont", "AB01–24", "ABxx"],
              ["const", "TOPO", "CCATATCCGTGTC"], ["const", "TOPO end", "GCCCTT"]];
 const MAB_TAG = ["utag", "utag-fwd or -rev", "NNNNNNNNNN"];
+
+// ONT kits: what sits 5' of the insert (Dorado / barbell kit definitions, checked on real reads)
+const COMMON = ["common", "shared adapter start", "CCTGTACTTCGTTCAGTT"];
+// rapid adapter: shared start, a 5-11 nt stretch that basecalls variably (most often ATGCAAAA), then the end
+const RAPID = [COMMON, ["adapter", "variable, 5–11 nt", "ATGCAAAA"], ["const", "rapid adapter end", "GCTTGGGTGTTTAACC"]];
+const TN_FLANK = ["const", "transposase flank", "GTTTTCGCATTTATCGTGAAACGCTTTCGCGTTTTTCGTGCGCCGCTTCA"];
+const AMPLICON = ["insert", "fragment start", "·····"], FRAGMENT = ["insert", "random fragment", "·····"];
+const kits = [
+  ["SQK-LSK114", "ligation", [COMMON, ["adapter", "Ligation Adapter end (T overhang)", "ACGTATTGCT"], AMPLICON]],
+  ["SQK-NBD114", "ligation, native barcode", [COMMON, ["adapter", "adapter", "ACGT"], ["const", "NB front", "ATTGCTAAGGTTAA"],
+    ["ont", "NB01–96", "NBxx"], ["const", "NB rear", "CAGCACCT"], AMPLICON]],
+  ["SQK-MAB114", "rapid adapter, TOPO", [...RAPID, ["ont", "AB01–24", "ABxx"], ["const", "TOPO site", "CCATATCCGTGTCGCCCTT"], AMPLICON]],
+  ["SQK-RAD114", "rapid, transposase", [...RAPID, TN_FLANK, FRAGMENT]],
+  ["SQK-RBK114", "rapid barcoding", [...RAPID, ["ont", "RB01–96", "RBxx"], TN_FLANK, FRAGMENT]],
+];
 const MAB_PRIMER = ["primer", "27F or 1492R", "primer"];
 
 // spans: [first, last, class, label, sub], indices into ctx + [utag, primer]; "cdi" schemes mirror them on the read end.
@@ -163,6 +201,14 @@ const esc = s => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
 
 const toc = document.getElementById("toc");
 const root = document.getElementById("schemes");
+toc.insertAdjacentHTML("beforeend", `<a href="#kits">ONT kits</a>`);
+document.getElementById("kitrows").innerHTML = kits.map(([kit, sub, segs]) =>
+  `<div class="kit">${esc(kit)}<small>${esc(sub)}</small></div><div class="scroll">` +
+  `<div class="scheme" style="grid-template-columns: auto repeat(${segs.length}, auto) auto">` +
+  `<div class="end" style="grid-column:1">5′-</div>` +
+  segs.map(([kind, label, seq], i) => `<div class="lab ${kind}" style="grid-row:1;grid-column:${i + 2}">${esc(label)}</div>` +
+    `<div class="seq ${kind}" style="grid-row:2;grid-column:${i + 2}">${esc(seq)}</div>`).join("") +
+  `<div class="end" style="grid-column:${segs.length + 2}">-3′</div></div></div>`).join("");
 for (const sc of schemes) {
   toc.insertAdjacentHTML("beforeend", `<a href="#${sc.id}">${esc(sc.nav || sc.id)}</a>`);
   let segs, spans;

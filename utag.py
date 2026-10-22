@@ -16,7 +16,7 @@ expects for Ftag/Rtag FASTAs; barbell finds them on either read strand.
 Only needs Python >= 3.8 (stdlib) and the `barbell` binary.
 """
 
-import argparse, csv, glob, gzip, itertools, json, os, random, re, resource, shutil
+import argparse, csv, glob, gzip, importlib.util, itertools, json, os, random, re, resource, shutil
 import subprocess, sys, time
 from collections import Counter, defaultdict
 
@@ -1048,41 +1048,103 @@ def cmd_demux(a):
     print_step("run summary")
     print_summary(stats, n_total)
     print()
+    report = write_run_report(out)
     print_kv([("samples", f"{rel(os.path.join(out, 'samples'))}/<sample>{ext}"),
               ("summary", rel(summary)), ("unexpected", rel(unexp_tsv)), ("run summary", rel(run_csv)), ("patterns", rel(os.path.join(bb, 'inspect.txt'))),
-              ("barbell files", rel(bb))])
+              ("barbell files", rel(bb))] + ([("report", rel(report))] if report else []))
     print()
     print_note("check barbell/inspect.txt - the two top patterns should be the two filter patterns.")
 
 
-def cmd_twopass(a):
-    """Pass 1: barbell kit (ONT barcode). Pass 2: barbell utag demux inside every ONT bin."""
-    reads = expand_reads(a.reads)
-    barbell = shutil.which(a.barbell) or sys.exit(f"barbell not found ({a.barbell}); install it first")
-    mab = a.kit.upper().startswith("SQK-MAB")
-    if a.mab_defaults:
-        print_info(f"MAB kit: using the unique dual index design --plates {rel(a.plates)} --tags {rel(a.tags)}")
-    rows = load_layout(a)
-    ctx2 = a.context or "bare"                          # pass 1 trimmed the ONT barcode and its flanks
-    single = a.single_end or mab                        # MAB reads carry barcode + utag at the read start only
-    if single:                                          # check before the long pass 1, per ONT/AB bin
-        by_bin = defaultdict(list)
-        for r in rows:
-            by_bin[r["ont"]].append(r)
-        for b, rs in sorted(by_bin.items()):
-            err = udi_problem(rs)
-            if err:
-                sys.exit(f"--single-end{' (' + b + ')' if b else ''}: {err}")
-    if mab:
-        print_info("MAB kit: pass 2 searches one utag (fwd or rev) + primer at the read start; the far read end is not used")
-    out = os.path.abspath(a.outdir)
-    DISPLAY_BASE[0] = out
-    bb = os.path.join(out, "barbell")         # barbell's own files; samples/ and the summaries stay in out
-    kitdir, p2dir = os.path.join(bb, "pass1_kit"), os.path.join(bb, "pass2_utag")
-    for d in (kitdir, p2dir):
-        os.makedirs(d, exist_ok=True)
+def write_run_report(out):
+    """run_summary.html: compare-runs.py's page for this run alone (from utag.log and summary.tsv in out)"""
+    src, log = os.path.join(os.path.dirname(os.path.realpath(__file__)), "compare-runs.py"), os.path.join(out, "utag.log")
+    if os.environ.get("UTAG_NO_REPORT") or not os.path.exists(src) or not os.path.exists(log):
+        return None                         # UTAG_NO_REPORT: twopass pass 2, the bins go into the twopass report
+    spec = importlib.util.spec_from_file_location("compare_runs", src)
+    cr = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cr)
+    sys.stdout.flush()
+    r = cr.parse_log(log)
+    r["label"] = os.path.basename(os.path.normpath(out))
+    r["samples"], r["meta"] = cr.read_samples(log, r["subcommand"])
+    path = os.path.join(out, "run_summary.html")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(cr.render_html([r], r["label"], f"utag run summary: {r['label']}", 8))
+    return path
 
-    # ---- pass 1: ONT barcodes
+
+BIN_DIR_RE = re.compile(r"^(barcode\d+)$", re.I)
+# the barcode Dorado / MinKNOW wrote into a read header: al:Z:barcode01, RG:Z:..._barcode01, or barcode=barcode01
+HEADER_BC_RE = re.compile(r"(?:\bal:Z:|_|\bbarcode=)(barcode\d+|unclassified)\b")
+
+
+def bin_num(name):
+    """barcode01, NB01, RB01, 01 -> 1 (the ONT bin a sample sheet ont-barcode means); other names unchanged"""
+    m = re.search(r"(\d+)$", name or "")
+    return int(m.group(1)) if m else name
+
+
+def dorado_bins(reads, workdir):
+    """Reads already demultiplexed by Dorado / MinKNOW -> ({bin: [fastq files]}, [unclassified files]).
+    Files under a barcodeNN/ folder belong to that bin; other files are split by the barcode in each read header
+    into workdir/dorado_bins/<bin>.fastq."""
+    bins, unclassified, other = defaultdict(list), [], []
+    for f in reads:
+        parts = os.path.normpath(os.path.abspath(f)).split(os.sep)[:-1]
+        b = next((p for p in reversed(parts) if BIN_DIR_RE.match(p)), None)
+        if b:
+            bins[b.lower()].append(f)
+        elif "unclassified" in parts:
+            unclassified.append(f)
+        else:
+            other.append(f)
+    if other:
+        os.makedirs(os.path.join(workdir, "dorado_bins"), exist_ok=True)
+        outs, no_bc = {}, 0
+        for f in other:
+            with (gzip.open if f.endswith(".gz") else open)(f, "rt") as fh:
+                while True:
+                    rec = [fh.readline() for _ in range(4)]
+                    if not rec[0]:
+                        break
+                    m = HEADER_BC_RE.search(rec[0])
+                    b = m.group(1).lower() if m else "unclassified"
+                    no_bc += not m
+                    if b not in outs:
+                        outs[b] = open(os.path.join(workdir, "dorado_bins", b + ".fastq"), "w")
+                    outs[b].writelines(rec)
+        for b, fh in outs.items():
+            fh.close()
+            (unclassified if b == "unclassified" else bins[b]).append(fh.name)
+        if no_bc:
+            print_note(f"{fmt_int(no_bc)} reads in {len(other)} file(s) outside barcodeNN/ folders have no barcode in the header: "
+                       "counted as unclassified")
+    return dict(sorted(bins.items())), unclassified
+
+
+def detect_context(files, n=2000):
+    """Pass-2 context of Dorado-demultiplexed reads: is the ONT barcode still on them (untrimmed) and which kit.
+    Looks for the kit sequence 5' of the utag in the first 150 nt of both read ends. Returns (context, shares)."""
+    per = max(1, n // max(1, len(files)))
+    seqs = []
+    for f in files:
+        with (gzip.open if f.endswith(".gz") else open)(f, "rt") as fh:
+            for i, ln in enumerate(fh):
+                if i // 4 >= per or len(seqs) >= n:
+                    break
+                if i % 4 == 1:
+                    seqs.append(ln.strip().upper())
+    probes = {"mab": lambda w: locate(MAB_TOPO, w, present_edits(len(MAB_TOPO))),
+              "nbd": lambda w: NB_REAR in w and locate(NB_FRONT, w, present_edits(len(NB_FRONT))),
+              "lsk": lambda w: locate(LSK_ADAPTER_TAIL, w, present_edits(len(LSK_ADAPTER_TAIL)))}
+    share = {c: sum(1 for x in seqs if any(f(w) for w in (x[:150], rc(x[-150:])))) / max(1, len(seqs)) for c, f in probes.items()}
+    ctx = next((c for c in ("mab", "nbd", "lsk") if share[c] >= 0.3), "bare")
+    return ctx, share
+
+
+def barbell_pass1(a, reads, barbell, bb, kitdir):
+    """twopass pass 1: barbell kit splits the reads by ONT barcode (and trims it) -> {bin: [fastq]}"""
     print_step(f"[pass 1] barbell kit -k {a.kit}")
     kit_help = help_text(barbell, "kit")
     in_reads = reads
@@ -1103,23 +1165,92 @@ def cmd_twopass(a):
         os.remove(merged)
     bins = {}
     for f in sorted(glob.glob(os.path.join(kitdir, "*.trimmed.fastq*"))):
-        bins[re.sub(r"\.trimmed\.fastq(\.gz)?$", "", os.path.basename(f))] = f
+        bins[re.sub(r"\.trimmed\.fastq(\.gz)?$", "", os.path.basename(f))] = [f]
     if not bins:
         sys.exit("pass 1 produced no ONT barcode bins; check pass1_kit.log and --kit")
     print_info(f"{len(bins)} ONT bins: {', '.join(bins)}")
+    return bins
+
+
+def dorado_pass1(a, reads, bb):
+    """twopass --dorado: the bins Dorado / MinKNOW already made -> {bin: [fastq]}; unclassified reads are left out"""
+    print_step("[pass 1] Dorado bins (barbell kit skipped)")
+    bins, unclassified = dorado_bins(reads, bb)
+    if not bins:
+        sys.exit("--dorado: no barcodeNN/ folders and no barcode in the read headers (al:Z:, RG:Z:..._barcodeNN, barcode=); "
+                 "use -k to demultiplex with barbell kit")
+    print_info(f"{len(bins)} ONT bins: {', '.join(bins)}")
+    if unclassified:
+        n = sum(count_fastq_reads(f) for f in unclassified)
+        print_note(f"unclassified: {fmt_int(n)} reads in {len(unclassified)} file(s), not demultiplexed "
+                   "(Dorado found no ONT barcode; twopass -k would try them again with barbell kit)")
+    return bins
+
+
+def cmd_twopass(a):
+    """Pass 1: barbell kit (ONT barcode), or the bins Dorado already made (--dorado). Pass 2: barbell utag demux
+    inside every ONT bin."""
+    if not a.kit and not a.dorado:
+        sys.exit("-k/--kit is required (or --dorado for reads already demultiplexed by Dorado / MinKNOW)")
+    reads = expand_reads(a.reads)
+    barbell = shutil.which(a.barbell) or sys.exit(f"barbell not found ({a.barbell}); install it first")
+    mab = (a.kit or "").upper().startswith("SQK-MAB")
+    if a.mab_defaults:
+        print_info(f"MAB kit: using the unique dual index design --plates {rel(a.plates)} --tags {rel(a.tags)}")
+    rows = load_layout(a)
+    ctx2 = a.context or "bare"                          # pass 1 trimmed the ONT barcode and its flanks (--dorado: detected below)
+    single = a.single_end or mab                        # MAB reads carry barcode + utag at the read start only
+    if single:                                          # check before the long pass 1, per ONT/AB bin
+        by_bin = defaultdict(list)
+        for r in rows:
+            by_bin[r["ont"]].append(r)
+        for b, rs in sorted(by_bin.items()):
+            err = udi_problem(rs)
+            if err:
+                sys.exit(f"--single-end{' (' + b + ')' if b else ''}: {err}")
+    if mab:
+        print_info("MAB kit: pass 2 searches one utag (fwd or rev) + primer at the read start; the far read end is not used")
+    out = os.path.abspath(a.outdir)
+    DISPLAY_BASE[0] = out
+    bb = os.path.join(out, "barbell")         # barbell's own files; samples/ and the summaries stay in out
+    kitdir, p2dir = os.path.join(bb, "pass1_kit"), os.path.join(bb, "pass2_utag")
+    for d in (kitdir, p2dir):
+        os.makedirs(d, exist_ok=True)
+
+    # ---- pass 1: ONT barcodes (bins as lists of fastq files)
+    if a.dorado:
+        bins = dorado_pass1(a, reads, bb)
+        if not a.context:                       # Dorado may or may not have trimmed the barcode: look at the reads
+            big = max(bins, key=lambda b: sum(os.path.getsize(f) for f in bins[b]))
+            ctx2, share = detect_context(bins[big])
+            print_info(f"pass 2 context: -c {ctx2} (detected in {big}: " +
+                       ", ".join(f"{c} adapter in {100 * v:.0f}%" for c, v in share.items()) +
+                       "; >= 30% -> that context, else bare = barcode trimmed; set -c to override)")
+            if ctx2 == "mab" and not single:
+                single = True
+                print_info("MAB reads: pass 2 searches one utag (fwd or rev) + primer at the read start (--single-end)")
+                by_bin = defaultdict(list)
+                for r in rows:
+                    by_bin[r["ont"]].append(r)
+                for b, rs in sorted(by_bin.items()):
+                    err = udi_problem(rs)
+                    if err:
+                        sys.exit(f"--single-end{' (' + b + ')' if b else ''}: {err}")
+    else:
+        bins = barbell_pass1(a, reads, barbell, bb, kitdir)
 
     # ---- pass 2: utags inside each bin
     has_ont_col = any(r["ont"] for r in rows)
     bin_rows, skipped = {}, []
     for b in bins:
-        bin_rows[b] = [r for r in rows if (not has_ont_col) or r["ont"] == b]
+        bin_rows[b] = [r for r in rows if (not has_ont_col) or bin_num(r["ont"]) == bin_num(b)]   # NB01 = barcode01
         if not bin_rows[b]:
             skipped.append(b)
     if skipped:
         print_note(f"no samples listed for bin(s) {', '.join(skipped)}: skipped in pass 2")
     stats, per_sample, per_unexp = [], [], []
     unexp_tot = Counter()
-    for b, f in bins.items():
+    for b, fs in bins.items():
         if not bin_rows[b]:
             continue
         print_step(f"[pass 2] {b}: {len(bin_rows[b])} samples")
@@ -1131,7 +1262,7 @@ def cmd_twopass(a):
             w.writerow(["sample", "plate", "well", "utag-fwd", "utag-rev"])
             for r in bin_rows[b]:
                 w.writerow([r["plate-well"], r["plate"], r["well"], r["utag-fwd"], r["utag-rev"]])
-        cmd = [sys.executable, os.path.abspath(__file__), "demux", "-r", f, "-c", ctx2,
+        cmd = [sys.executable, os.path.abspath(__file__), "demux", "-r", *fs, "-c", ctx2,
                "-o", bdir, "-t", str(a.threads), "--barbell", barbell,
                "--samplesheet", sheet, "--plates", a.plates, "--tags", a.tags,
                "--max-offset", str(a.max_offset)]
@@ -1142,7 +1273,7 @@ def cmd_twopass(a):
                 cmd += [opt, str(val)]
         cmd += [x for x, on in (("--flip", not a.no_flip), ("--gzip", a.gzip), ("--skip-trim", a.skip_trim),
                                 ("--no-decoys", a.no_decoys), ("--single-end", single)) if on]
-        r = subprocess.run(cmd, capture_output=True, text=True, env={**os.environ, "NO_COLOR": "1"})
+        r = subprocess.run(cmd, capture_output=True, text=True, env={**os.environ, "NO_COLOR": "1", "UTAG_NO_REPORT": "1"})
         if r.returncode:
             for ln in (r.stdout + r.stderr).strip().splitlines()[-10:]:
                 print("    " + style(ln, "gray", err=True), file=sys.stderr)
@@ -1183,7 +1314,7 @@ def cmd_twopass(a):
         fh.write("ont_barcode\tsample\tplate\twell\tutag_fwd\tutag_rev\treads\n")
         fh.write("\n".join("\t".join(x) for x in per_sample) + "\n")
     n_total = sum(count_fastq_reads(f) for f in reads)
-    n_bins = sum(st[1] for st in stats) + sum(count_fastq_reads(bins[b]) for b in skipped)
+    n_bins = sum(st[1] for st in stats) + sum(count_fastq_reads(f) for b in skipped for f in bins[b])
     totals = [("total_reads", n_total), ("reads_in_ont_bins", n_bins),
               ("reads_with_ge1_tag_or_flank_hit", sum(st[2] for st in stats)),
               ("reads_assigned_to_samples", sum(st[3] for st in stats)),
@@ -1207,9 +1338,10 @@ def cmd_twopass(a):
                      f"{w_with}/{w_exp}"])
     print_table(["ONT bin", "reads", "with hit", "assigned", "assigned %", "", "samples with reads"], rows, "<>>>>><>", indent=4)
     print()
+    report = write_run_report(out)
     print_kv([("samples", f"{rel(os.path.join(out, 'samples'))}/<ONT bin>/<sample>.fastq"),
               ("tables", f"{rel(os.path.join(out, 'ont_bins.tsv'))}, summary.tsv, unexpected.tsv, run_summary.csv"),
-              ("barbell files", rel(bb))])
+              ("barbell files", rel(bb))] + ([("report", rel(report))] if report else []))
 
 
 IUPAC_RE = {"A": "A", "C": "C", "G": "G", "T": "T", "R": "[AG]", "Y": "[CT]", "M": "[AC]", "K": "[GT]",
@@ -1562,7 +1694,7 @@ def cmd_context(a):
                 f"primer (first {HIT_PRIMER_NT} nt, <= {HIT_EDITS} edits) within {a.max_offset} nt of a read end + "
                 f"utag (<= {HIT_EDITS} edits) right before it")
     R = {"hit_rule": hit_rule, "command": " ".join(sys.argv), "started": time.strftime("%Y-%m-%d %H:%M"), "cwd": os.getcwd(),
-         "reads": [rel(f) for f in reads[:5]], "n_files": len(reads), "files_used": n_used, "scanned": seen, "with_hit": dict(with_hit),
+         "reads": [rel(f) for f in reads[:5]], "input": " ".join(a.reads), "n_files": len(reads), "files_used": n_used, "scanned": seen, "with_hit": dict(with_hit),
          "n_align": a.n_align, "upstream": U, "min_support": a.min_support, "tags": rel(a.tags),
          "primer_f": a.primer_f or PRIMER_F, "primer_r": a.primer_r or PRIMER_R,
          "known": [{"ctx": c, "name": nm, "seq": sq, "qlen": ql, "layout": BARCODE_LAYOUT.get(c)} for c, nm, sq, ql in KNOWN_CONTEXTS],
@@ -1938,7 +2070,7 @@ def start_log(outdir, name="utag.log"):
 
 CONTEXT_HTML = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>utag context</title>
+<title>ONT/utag context report</title>
 <style>
 :root{color-scheme:light;--bg:#f9f9f7;--panel:#fcfcfb;--panel2:#f1f0ec;--ink:#0b0b0b;--dim:#52514e;--muted:#898781;--grid:#e1e0d9;
   --ring:rgba(11,11,11,.10);--s1:#2a78d6;--good:#006300;--warn:#a86400;--bad:#d03b3b;
@@ -1947,7 +2079,7 @@ CONTEXT_HTML = r"""<!doctype html>
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--ink);font:13px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
 header{padding:18px 24px 12px;border-bottom:1px solid var(--grid)}h1{margin:0;font-size:19px;font-weight:650}
-.sub{color:var(--dim);font-size:12px;margin-top:2px;word-break:break-all}.sub a{color:inherit;text-decoration:underline}
+.sub{color:var(--dim);font-size:12px;margin-top:8px;padding:6px 12px;background:#e7eef8;border:1px solid var(--ring);border-radius:8px;word-break:break-all}.sub a{color:inherit;text-decoration:underline}
 main{max-width:1280px;margin:0 auto;padding:16px 24px 48px;display:grid;gap:16px}
 .panel{background:var(--panel);border:1px solid var(--ring);border-radius:12px;padding:14px 16px 16px;min-width:0}
 h2{margin:-14px -16px 12px;padding:9px 16px;background:#e7eef8;border-bottom:1px solid var(--ring);border-radius:12px 12px 0 0;
@@ -2002,7 +2134,7 @@ tr.pick td{background:#e7eef8}tr.pick td:first-child{border-radius:4px 0 0 4px}t
 #ends .tk td,#ends .tk th{overflow:hidden;font-size:11.5px;padding:3px 3px}#ends .cell{min-width:44px;padding:1px 4px}#ends .bar{width:50px}.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;vertical-align:-1px}
 details summary{cursor:pointer;color:var(--dim)}
 </style></head><body>
-<header><h1>utag context</h1><div class="sub" id="sub"></div></header>
+<header><h1>ONT/utag context report</h1><div class="sub" id="sub"></div></header>
 <main>
   <section class="panel"><h2>Hits</h2><div id="hitcols"><div id="tiles"></div><div id="bcs"><h3 style="margin-top:0">ONT barcodes</h3><div class="note">No ONT barcodes with utags found</div></div></div>
     <div class="note">hit: <span id="rule"></span></div></section>
@@ -2021,8 +2153,9 @@ const heat = f => { const i = f <= 0 ? 0 : Math.min(5, 1 + Math.floor(f * 5)); r
 const bar = f => `<span class="bar"><i style="width:${(100 * f).toFixed(1)}%"></i></span>`;
 const cseq = s => [...s].map(c => `<span style="color:var(--${"ACGT".includes(c) ? c : "muted"})">${esc(c)}</span>`).join("");
 $("rule").textContent = R.hit_rule;
-$("sub").innerHTML = `Report generated on ${esc(R.started)} by <a href="https://github.com/angelovangel/utag">utag</a> · ` +
-  `${R.n_files} input file${R.n_files === 1 ? "" : "s"}: </br>${esc(R.reads.join(", "))}${R.n_files > R.reads.length ? ", …" : ""}`;
+$("sub").innerHTML = `Report generated on <b>${esc(R.started)}</b> by <a href="https://github.com/angelovangel/utag">utag</a>` +
+  `<br><span class="seq">${esc(R.input)}</span>, ${fmt(R.scanned)} reads scanned from ${fmt(R.files_used)} of ${fmt(R.n_files)} files, ` +
+  `${R.upstream} nt upstream, first ${fmt(R.n_align)} hits per read end aligned`;
 
 // ---- suggestion
 const V = R.verdict, E = R.ends;
@@ -2110,13 +2243,14 @@ function logo(e, known, bcs, end = "utag") {    // base frequencies per position
     bcs = bcs || (V && V.ctx === known.ctx && V.barcodes ? V.barcodes : []);
     const bc = bcs.length && bcs[0][1] >= 0.8 ? bcs[0] : null;           // one barcode: show its sequence
     const bcLab = bc ? ` (${bc[0]})` : bcs.length > 1 ? ` (mixed: ${bcs.slice(0, 3).map(b => b[0]).join(", ")})` : "";
-    let p = 0;
+    let p = 0, alt = 0;                       // alt: neighbouring constant parts in two shades
     [...lay].reverse().forEach(([lab, sq, n]) => {
       const p0 = p + 1, p1 = p + n; p = p1;                  // positions -p1 .. -p0
       bcSeq = (sq || (bc ? bc[2] : "·".repeat(n))) + bcSeq;
       if (p0 > U) return;
       const x0 = xi(Math.min(p1, U)), x1 = xi(p0) + cw, isBc = !sq;
-      h += `<rect x="${x0}" y="${top - 16}" width="${x1 - x0}" height="${H + 16}" fill="${isBc ? "#fdf0d5" : "#eef2f7"}" rx="3"/>`;
+      const fill = isBc ? "#fdf0d5" : alt++ % 2 ? "#e2e9f2" : "#eef2f7";
+      h += `<rect x="${x0 + 1}" y="${top - 16}" width="${x1 - x0 - 2}" height="${H + 16}" fill="${fill}" rx="3"/>`;
       h += `<text x="${(x0 + x1) / 2}" y="${top - 5}" text-anchor="middle" style="fill:${isBc ? "#8a5a00" : "var(--dim)"};font-weight:${isBc ? 650 : 500}">${esc(lab)}${isBc ? esc(bcLab) : ""}${p1 > U ? " …" : ""}</text>`;
     });
   }
@@ -2254,7 +2388,12 @@ def main():
             g.add_argument("-r", "--reads", nargs="+", required=True, metavar="FASTQ",
                            help="FASTQ files, globs or folders (searched recursively; .fastq/.fq[.gz])")
         if kit:
-            g.add_argument("-k", "--kit", required=True, help="barbell kit, e.g. SQK-NBD114-96, SQK-NBD114-24, SQK-MAB114-24")
+            g.add_argument("-k", "--kit", help="barbell kit, e.g. SQK-NBD114-96, SQK-NBD114-24, SQK-MAB114-24 "
+                                                "(required unless --dorado; with --dorado it only sets the SQK-MAB defaults)")
+            g.add_argument("--dorado", action="store_true",
+                           help="reads already demultiplexed by Dorado / MinKNOW: the barcodeNN/ folders (or the barcode "
+                                "in each read header) are the ONT bins and barbell kit (pass 1) is skipped; unclassified "
+                                "reads are left out; the pass 2 context is detected (untrimmed NBD reads: -c nbd)")
         if outdir:
             g.add_argument("-o", "--outdir", default=outdir, metavar="DIR", help=f"output folder (default {outdir})")
 
@@ -2314,7 +2453,7 @@ def main():
     run(d)
 
     # ---- twopass
-    t2 = sub("twopass", "barbell kit (ONT barcode) first, then utag demux inside each ONT bin", cmd_twopass)
+    t2 = sub("twopass", "barbell kit (ONT barcode) or the Dorado bins (--dorado) first, then utag demux inside each ONT bin", cmd_twopass)
     io(t2, outdir="twopass_out", kit=True)
     library(t2, context=dict(choices=CONTEXTS, help="pass 2 context 5' of the utag (default bare: pass 1 trimmed the ONT barcode)"),
             single="pass 2 uses only the utag at the read start, fwd or rev (default for SQK-MAB kits)", prefix=False)
@@ -2370,7 +2509,7 @@ def main():
 
     a = ap.parse_args()
     # defaults that depend on the library: a MAB kit is read from one tag, so it needs the unique dual index design
-    mab = a.cmd == "twopass" and a.kit.upper().startswith("SQK-MAB")
+    mab = a.cmd == "twopass" and (a.kit or "").upper().startswith("SQK-MAB")
     a.mab_defaults = mab and a.plates is None
     if a.plates is None:
         a.plates = os.path.join(here, MAB_PLATES if mab else PLATES)

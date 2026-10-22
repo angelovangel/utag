@@ -22,10 +22,12 @@ demux and twopass name two metrics differently; both are reported under the twop
 Writes, into the output folder (-o, default compare_out/)
     run_comparison.csv    one row per metric, one column per run, then <run>_vs_<baseline> difference columns
     samples.csv           reads per sample and run (only when a summary.tsv was found)
-    run_comparison.html   ONE self-contained page (no internet): read fate and pattern charts, metrics table with
-                          a selectable baseline, top patterns, ONT bins, per-sample scatter of any two runs, and
+    run_comparison.html   ONE self-contained page (no internet): grouped metrics table, top patterns, ONT bins, per-sample scatter of any two runs, and
                           negative controls: mark empty wells (e.g. an unused plate) on the plate grids and read
                           sensitivity / specificity per run (the selection stays in the browser; results download as CSV)
+
+With one run the page is a run summary (no baseline or differences; reads per sample ranked): utag.py demux
+writes it as run_summary.html through render_html().
 
 Python >= 3.8, standard library only.
 """
@@ -66,7 +68,8 @@ def num(s):
 def parse_log(path):
     r = {"log": path, "started": "", "cwd": "", "command": "", "subcommand": "", "context": "", "kit": "",
          "status": "incomplete", "barbell_seconds": 0.0, "steps": {}, "warnings": [], "errors": [],
-         "summary": {}, "found": {}, "patterns": {}, "unique_patterns": None, "bins": {}, "info": []}
+         "summary": {}, "found": {}, "patterns": {}, "unique_patterns": None, "bins": {}, "info": [], "pass2": [],
+         "pass1": None}
     step, pass2_bin = "", None
     with open(path, encoding="utf-8", errors="replace") as fh:
         lines = fh.read().splitlines()
@@ -87,6 +90,8 @@ def parse_log(path):
         m = STEP_RE.match(ln)
         if m:
             step = m.group(1)
+            if step.startswith("[pass 1] "):     # twopass: how the reads were split by ONT barcode
+                r["pass1"] = {"method": step[9:], "lines": []}
             pm = re.match(r"\[pass 2\] (\S+):", step)
             pass2_bin = pm.group(1) if pm else None
             qm = re.match(r"\[1/6\] query FASTAs \((\S+)", step)
@@ -100,6 +105,8 @@ def parse_log(path):
             r["steps"][step] = r["steps"].get(step, 0) + sec
             continue
         s = ln.strip()
+        if step.startswith("[pass 1] ") and s.startswith(("• ", "! ")):
+            r["pass1"]["lines"].append(s)
         if s.startswith("! "):
             r["warnings"].append(s[2:])
             continue
@@ -140,16 +147,20 @@ def parse_log(path):
                 r["summary"][ALIAS.get(m.group(1), m.group(1))] = num(m.group(2))
     if r["errors"] and r["status"] != "ok":
         r["status"] = "failed"
-    if r["subcommand"] == "twopass" and not r["patterns"]:     # sum the per-bin demux logs, if still there
+    if r["subcommand"] == "twopass":            # the per-bin demux logs (pass 2), if still there: kept per bin,
         sub = sorted(glob.glob(os.path.join(os.path.dirname(path), "barbell", "pass2_utag", "*", "utag.log")))
+        summed = not r["patterns"]               # and their patterns / tag counts summed for the whole run
         for p in sub:
             b = parse_log(p)
-            for k, v in b["found"].items():
-                r["found"][k] = r["found"].get(k, 0) + v
-            for k, v in b["patterns"].items():
-                r["patterns"][k] = r["patterns"].get(k, 0) + v
-            r["barbell_seconds"] += b["barbell_seconds"]
-        if sub:
+            b["label"] = os.path.basename(os.path.dirname(p))
+            r["pass2"].append(b)
+            if summed:
+                for k, v in b["found"].items():
+                    r["found"][k] = r["found"].get(k, 0) + v
+                for k, v in b["patterns"].items():
+                    r["patterns"][k] = r["patterns"].get(k, 0) + v
+                r["barbell_seconds"] += b["barbell_seconds"]
+        if sub and summed:
             r["info"].append(f"patterns summed over {len(sub)} per-bin logs (top patterns of each bin only)")
     return r
 
@@ -172,6 +183,24 @@ def read_samples(log, subcommand, ignore_bins=False):
             out[key] = out.get(key, 0) + n
             meta.setdefault(key, [plate, row.get("well", ""), row.get("utag_fwd", ""), row.get("utag_rev", "")])
     return out, meta
+
+
+def harmonize_bins(runs):
+    """twopass sample keys are <ONT bin>/<sample>: name a bin the same in every run when only the naming differs
+    (barbell NB01 = Dorado barcode01, matched by number), using the name of the first run that has the bin"""
+    num = lambda b: int(re.search(r"(\d+)$", b).group(1)) if re.search(r"(\d+)$", b) else b
+    first = {}
+    for r in runs:
+        for k in r["samples"] or {}:
+            if "/" in k:
+                b = k.split("/", 1)[0]
+                first.setdefault(num(b), b)
+    for r in runs:
+        if not r["samples"]:
+            continue
+        ren = lambda k: first.get(num(k.split("/", 1)[0]), k.split("/", 1)[0]) + "/" + k.split("/", 1)[1] if "/" in k else k
+        r["samples"] = {ren(k): v for k, v in r["samples"].items()}
+        r["meta"] = {ren(k): [ren(m[0])] + m[1:] if m and "/" in m[0] else m for k, m in r["meta"].items()}
 
 
 def find_logs(args):
@@ -289,7 +318,8 @@ def main():
     ap.add_argument("-o", "--outdir", default="compare_out",
                     help="output folder for run_comparison.csv, samples.csv and run_comparison.html (default compare_out)")
     ap.add_argument("--labels", nargs="+", help="one name per run (default: the run folder names)")
-    ap.add_argument("--baseline", help="run label the differences are taken against (default: the first run)")
+    ap.add_argument("--baseline", help="run label the CSV differences are taken against, and the x run of the sample "
+                                       "scatter (default: the first run)")
     ap.add_argument("--title", default="utag run comparison", help="page title")
     ap.add_argument("--theme", choices=["light", "dark", "auto"], default="light",
                     help="page colours; auto follows the viewer's system setting (default light)")
@@ -311,6 +341,8 @@ def main():
         r["label"] = l
         r["samples"], r["meta"] = (None, {}) if a.no_samples else read_samples(p, r["subcommand"], a.ignore_bins)
         runs.append(r)
+    if len(runs) > 1:
+        harmonize_bins(runs)
     base = a.baseline or labels[0]
     if base not in labels:
         sys.exit(f"--baseline {base}: not one of {', '.join(labels)}")
@@ -352,11 +384,14 @@ def render_html(runs, base, title, top, theme="light"):
             meta.setdefault(k, v)
     data = {
         "base": base, "meta": meta, "generated": time.strftime("%Y-%m-%d %H:%M"),
-        "foundLabels": FOUND_LABEL, "patterns": top_patterns(runs, top),
+        "foundLabels": FOUND_LABEL, "patterns": top_patterns(runs + [b for r in runs for b in r["pass2"]], top),
         "runs": [{**{k: r[k] for k in ("label", "log", "started", "cwd", "command", "subcommand", "context", "kit",
                                        "status", "steps", "warnings", "errors", "summary", "found", "patterns",
-                                       "unique_patterns", "bins", "info", "samples")},
-                  "barbell_seconds": round(r["barbell_seconds"], 1)} for r in runs],
+                                       "unique_patterns", "bins", "info", "samples", "pass1")},
+                  "barbell_seconds": round(r["barbell_seconds"], 1),
+                  "pass2": [{**{k: b[k] for k in ("label", "status", "steps", "warnings", "errors", "summary", "found",
+                                                  "patterns", "unique_patterns", "info")},
+                             "barbell_seconds": round(b["barbell_seconds"], 1)} for b in r["pass2"]]} for r in runs],
     }
     js = json.dumps(data, separators=(",", ":")).replace("</", "<\\/")
     attr = "" if theme == "auto" else f' data-theme="{theme}"'
@@ -404,25 +439,26 @@ tr.sec td{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spac
 th.sortable{cursor:pointer}th.sortable:hover{color:var(--ink)}
 .legend{display:flex;gap:4px 12px;flex-wrap:wrap;color:var(--dim);font-size:11.5px;margin:0 0 8px}
 .legend span{white-space:nowrap}
-.two.charts{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
 .legend i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:4px;vertical-align:-1px}
 svg text{fill:var(--dim);font-size:11px}
 .tip{position:fixed;pointer-events:none;background:var(--panel);color:var(--ink);border:1px solid var(--ring);border-radius:8px;
   padding:6px 9px;font-size:12px;box-shadow:0 4px 16px rgba(0,0,0,.18);display:none;z-index:9;max-width:420px}
 .tip .t{color:var(--dim)}
 .two{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);gap:16px}
-@media (max-width:900px){.two,.two.charts{grid-template-columns:1fr}header,main{padding-left:16px;padding-right:16px}}
+@media (max-width:900px){.two{grid-template-columns:1fr}header,main{padding-left:16px;padding-right:16px}}
 .mono{font-family:ui-monospace,Menlo,monospace;font-size:11.5px;white-space:pre-wrap;word-break:break-all;color:var(--dim)}
 .warn{color:var(--dim)}.warn::before{content:"! ";color:var(--s4);font-weight:700}
 .err::before{content:"✕ ";color:var(--bad);font-weight:700}
 .stat{color:var(--dim);font-size:12px;margin-top:6px}
 .cell{border-radius:4px;padding:1px 6px}
 details summary{cursor:pointer;color:var(--dim)}
-.hidden{display:none}
+.hidden{display:none}body.single .multi{display:none}
 .negbar{display:flex;gap:8px 14px;flex-wrap:wrap;align-items:center;margin-bottom:10px}
 .modes{display:inline-flex;gap:4px}.modes button.on{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
 .modes i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px;vertical-align:0}
 .plates{display:flex;flex-wrap:wrap;gap:14px;margin:6px 0 4px}
+#nplates{display:block}.bgrp+.bgrp{margin-top:10px;padding-top:8px;border-top:1px solid var(--grid)}
+.bt{font-weight:650;font-size:12px;color:var(--hink);letter-spacing:.04em}
 .pl{min-width:0}.pl .pt{font-weight:600;font-size:12px;cursor:pointer;margin-bottom:3px;display:flex;gap:8px;align-items:baseline}
 .pl .pt small{color:var(--muted);font-weight:400}.pl .pt:hover{color:var(--s1)}
 .pg{display:grid;gap:2px;user-select:none;-webkit-user-select:none}
@@ -434,38 +470,39 @@ details summary{cursor:pointer;color:var(--dim)}
 .w.exc{opacity:.3;background-image:repeating-linear-gradient(45deg,transparent 0 2px,var(--panel) 2px 3.5px)}
 .w.pre{outline:2px solid var(--ink);outline-offset:0}
 .kpi td.b{font-weight:600}
+.p1m{font-size:14px;font-weight:600}.p1m .tag{display:inline-block;font-size:11px;font-weight:600;padding:1px 8px;border-radius:9px;margin-right:8px;
+  background:var(--hbg);color:var(--hink);vertical-align:1px}.p1l{color:var(--dim);margin-top:3px}.p1l.pw::before{content:"! ";color:var(--s4);font-weight:700}
+#metrics{display:grid;gap:14px}#metrics.cols2{display:block;column-count:2;column-gap:32px}
+#metrics.cols2 .mg{break-inside:avoid;margin:0 0 14px}@media (max-width:900px){#metrics.cols2{column-count:1}}
+#metrics td .cell{display:inline-block;min-width:64px}
+#metrics .mg{margin:0}#metrics .mg h3{margin:0 0 2px;font-size:11px;font-weight:650;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+#metrics table{table-layout:fixed;width:auto}   /* fixed widths (colgroup): numbers next to the names, same columns in every group */
+#metrics td:first-child{white-space:normal}#metrics td.pr{color:var(--muted);padding-left:22px}#metrics tr.prow td{color:var(--muted);font-size:12px}
 .note{color:var(--muted);font-size:11.5px;margin-top:6px;line-height:1.5}
 .lowlist button{padding:0 6px;font-size:11px}
 </style></head><body>
 <header><h1>__TITLE__</h1><div class="sub" id="sub"></div></header>
 <main>
-  <div class="two charts">
-    <section class="panel"><h2>Read fate <span class="ctl" style="font-size:12px;color:var(--muted)">% of total reads</span></h2>
-      <div class="legend" id="fateLegend"></div><div id="fate"></div></section>
-    <section class="panel"><h2>Tags found per read <span class="ctl" style="font-size:12px;color:var(--muted)">% of reads with a hit</span></h2>
-      <div class="legend" id="foundLegend"></div><div id="found"></div></section>
-  </div>
+  <section class="panel hidden" id="p1Panel"><h2>Pass 1: ONT barcodes</h2><div id="p1"></div></section>
   <section class="panel"><h2>Metrics<span class="ctl">
-      <label>baseline <select id="baseSel"></select></label>
-      <label><input type="checkbox" id="diffOnly"> differences only</label>
+      <label class="multi"><input type="checkbox" id="diffOnly"> differences only</label>
       <label><input type="checkbox" id="showPct" checked> show % rows</label></span></h2>
-    <div class="scroll"><table id="metrics"></table></div></section>
+    <div id="metrics"></div></section>
   <section class="panel" id="patPanel"><h2>Top read patterns<span class="ctl">
       <label><select id="patMode"><option value="share">share of reads with a hit</option><option value="reads">reads</option></select></label></span></h2>
     <div class="scroll"><table id="pats"></table></div></section>
-  <section class="panel hidden" id="binPanel"><h2>ONT bins (twopass)<span class="ctl">
-      <label><select id="binMode"><option value="pct">assigned %</option><option value="assigned">assigned reads</option><option value="reads">reads in bin</option><option value="samples">samples with reads</option></select></label></span></h2>
+  <section class="panel hidden" id="binPanel"><h2>ONT bins (twopass)</h2>
     <div class="scroll"><table id="bins"></table></div></section>
   <section class="panel hidden" id="smpPanel"><h2>Reads per sample<span class="ctl">
-      <label>x <select id="sx"></select></label><label>y <select id="sy"></select></label>
+      <label class="multi">x <select id="sx"></select></label><label class="multi">y <select id="sy"></select></label>
       <label><select id="scale"><option value="log">log scale</option><option value="linear">linear scale</option></select></label>
-      <label><input type="checkbox" id="hideZero"> hide samples with 0 in both</label></span></h2>
+      <label class="multi"><input type="checkbox" id="hideZero"> hide samples with 0 in both</label></span></h2>
     <div class="two"><div><div id="scatter"></div><div class="stat" id="sstat"></div></div>
       <div><div style="display:flex;gap:8px;margin-bottom:6px"><input id="q" placeholder="filter samples…" style="flex:1">
         <select id="sortBy"><option value="diff">sort: largest difference</option><option value="fc">sort: largest fold change</option><option value="x">sort: x reads</option><option value="y">sort: y reads</option><option value="name">sort: name</option></select></div>
         <div class="scroll" style="max-height:420px;overflow-y:auto"><table id="stab"></table></div></div></div></section>
   <section class="panel hidden" id="negPanel"><h2>Negative controls<span class="ctl">
-      <label>colour wells by <select id="ncol"></select></label></span></h2>
+      <label class="multi">colour wells by <select id="ncol"></select></label></span></h2>
     <div class="negbar">
       <span class="modes" id="nmodes">
         <button data-m="neg" class="on"><i style="background:var(--bad)"></i>negative</button>
@@ -496,80 +533,93 @@ function showTip(e, h) { tip.innerHTML = h; tip.style.display = "block"; const w
   let x = e.clientX + 14, y = e.clientY + 14; if (x + w > innerWidth - 8) x = e.clientX - w - 14; if (y + hh > innerHeight - 8) y = e.clientY - hh - 14;
   tip.style.left = x + "px"; tip.style.top = y + "px"; }
 const hideTip = () => tip.style.display = "none";
-let base = D.base;
-const assigned = r => r.summary.reads_assigned_to_samples;
+const SINGLE = R.length === 1;              // one run: a run summary, nothing to compare against
+if (SINGLE) document.body.classList.add("single");
+const subLine = () => SINGLE
+  ? `${R[0].subcommand || "run"}${/\s--dorado\b/.test(R[0].command) ? " --dorado" : ""}${R[0].context ? " -c " + R[0].context : ""}${R[0].kit ? " -k " + R[0].kit : ""} · started ${R[0].started} · ${R[0].log} · generated ${D.generated}`
+  : `${R.length} runs · generated ${D.generated}`;
+$("sub").textContent = subLine();
+// columns of the run views: the runs, or for one twopass run "all bins" + each ONT bin (pass 2)
+// (bins with < 0.1% of the reads, at least 10, are counted in "all bins" only)
+const P2 = SINGLE && R[0].pass2 ? R[0].pass2 : [], minBin = Math.max(10, 0.001 * ((R[0] && R[0].summary.total_reads) || 0));
+const P2small = P2.filter(b => (b.summary.total_reads || 0) < minBin);
+const C = P2.length ? [{...R[0], label: "all bins"}, ...P2.filter(b => !P2small.includes(b))] : R;
+if (P2small.length && R[0].samples)          // their samples (all wells of the plate map, ~0 reads) would swamp the sample views
+  for (const k of Object.keys(R[0].samples)) if (P2small.some(b => k.startsWith(b.label + "/"))) delete R[0].samples[k];
 
-$("sub").textContent = `${R.length} runs · generated ${D.generated} · baseline ${base}`;
-
-// ---- horizontal 100% stacked bars, one row per run
-function stacked(el, legendEl, segs, rowsOf, note) {
-  const colors = ["var(--s1)", "var(--s2)", "var(--s3)", "var(--s4)"];
-  legendEl.innerHTML = segs.map((s, i) => `<span><i style="background:${colors[i]}"></i>${esc(s)}</span>`).join("");
-  const lw = Math.min(170, 12 + 7 * Math.max(...R.map(r => r.label.length))), W = 640, rh = 26, top = 4, H = top + R.length * rh + 22;
-  const pw = W - lw - 22;
-  let svg = `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img">`;
-  for (const t of [0, 25, 50, 75, 100]) { const x = lw + pw * t / 100;
-    svg += `<line x1="${x}" x2="${x}" y1="${top}" y2="${H - 18}" stroke="var(--grid)"/><text x="${x}" y="${H - 5}" text-anchor="middle">${t}%</text>`; }
-  R.forEach((r, i) => { const y = top + i * rh + 5, vals = rowsOf(r), tot = vals.reduce((a, b) => a + b, 0);
-    svg += `<text x="${lw - 8}" y="${y + 12}" text-anchor="end" style="fill:var(--ink)">${esc(r.label.length > 24 ? "…" + r.label.slice(-23) : r.label)}</text>`;
-    if (!tot) { svg += `<text x="${lw + 4}" y="${y + 12}">${note}</text>`; return; }
-    let x = lw;
-    vals.forEach((v, j) => { const w = pw * v / tot; if (w <= 0) return;
-      const h = `<b>${esc(r.label)}</b><br><span class="t">${esc(segs[j])}</span><br>${fmt(v)} reads · ${pf(100 * v / tot)}`;
-      svg += `<rect x="${x}" y="${y}" width="${Math.max(0, w - 2)}" height="16" rx="3" fill="${colors[j]}" data-h="${esc(h)}"/>`;
-      if (w > 38) svg += `<text x="${x + w / 2 - 1}" y="${y + 12}" text-anchor="middle" style="fill:#fff;font-weight:600;pointer-events:none">${Math.round(100 * v / tot)}%</text>`;
-      x += w; }); });
-  el.innerHTML = svg + "</svg>";
-  el.querySelectorAll("rect[data-h]").forEach(n => { n.addEventListener("mousemove", e => showTip(e, n.dataset.h)); n.addEventListener("mouseleave", hideTip); });
-}
-stacked($("fate"), $("fateLegend"), ["assigned to a sample", "tag or flank hit, not assigned", "no hit"], r => { const s = r.summary, t = s.total_reads || 0;
-  const a = assigned(r) || 0, h = s.reads_with_ge1_tag_or_flank_hit ?? 0; return t ? [a, Math.max(0, h - a), Math.max(0, t - h)] : []; }, "no run summary in log");
 const fk = Object.keys(D.foundLabels);
-stacked($("found"), $("foundLegend"), fk.map(k => D.foundLabels[k]), r => fk.map(k => r.found[k] || 0), "no pattern table in log");
+
+// ---- twopass pass 1: Dorado / MinKNOW bins or barbell kit
+const p1kind = r => !r.pass1 ? "" : /dorado/i.test(r.pass1.method) ? "Dorado / MinKNOW bins" : "barbell kit";
+if (R.some(r => r.pass1)) {
+  $("p1Panel").classList.remove("hidden");
+  $("p1").innerHTML = R.filter(r => r.pass1).map(r => `<div style="margin-bottom:10px">` +
+    `<div class="p1m">${SINGLE ? "" : `<span style="color:var(--dim);font-weight:400">${esc(r.label)}</span> · `}` +
+    `<span class="tag">${esc(p1kind(r))}</span>${esc(r.pass1.method)}</div>` +
+    (/dorado/i.test(r.pass1.method)
+      ? `<div class="p1l">The reads were already split by ONT barcode when they were basecalled (Dorado / MinKNOW barcodeNN folders or read headers); utag used those bins as they are.</div>`
+      : `<div class="p1l">utag split the reads by ONT barcode with barbell kit (and trimmed the barcode) before searching the utags in each bin.</div>`) +
+    r.pass1.lines.map(l => `<div class="p1l ${l.startsWith("! ") ? "pw" : ""}">${esc(l.replace(/^[•!] /, ""))}</div>`).join("") + `</div>`).join("");
+  const kinds = [...new Set(R.map(p1kind).filter(Boolean))];
+  $("binPanel").querySelector("h2").firstChild.textContent = `ONT bins (${kinds.join(", ")})`;
+}
 
 // ---- metrics table
-const GOOD_UP = new Set(["reads_with_ge1_tag_or_flank_hit", "reads_assigned_to_samples", "pattern_reads_tag_both_ends", "samples_with_reads", "reads_in_ont_bins", "tag_both_ends"]);
-const GOOD_DOWN = new Set(["pattern_reads_tag_one_end_only", "unexpected_reads", "unexpected_reads_decoy_wells", "unexpected_reads_other", "unexpected_or_unparsed_files", "tag_one_end_only", "flank_only", "barbell_seconds"]);
+// background by share (0..1), the blue steps of the top read patterns table (--q0..--q5)
+const shade = f => { const i = f <= 0 ? 0 : Math.min(5, 1 + Math.floor(f * 5)); return `background:var(--q${i});${i >= 4 ? "color:#fff" : ""}`; };
 const isPctRow = k => /^(reads|pattern_reads|unexpected_reads)/.test(k);
-function metricRows() {
+// groups of the metrics table: [title, test on the metric key]; keys that fit none go into "other"
+const MGROUPS = [["reads", k => /^(total_reads|reads_in_ont_bins|reads_with_ge1_tag_or_flank_hit|reads_assigned_to_samples)$/.test(k)],
+  ["samples and ONT bins", k => /^(samples_|ont_bins_)/.test(k)], ["tags found per read", k => k.startsWith("found:")],
+  ["unexpected reads and decoys", k => /^(unexpected_|decoy_)/.test(k)],
+  ["run", k => /^(unique_patterns|barbell_seconds|warnings)$/.test(k)]];
+const MNAME = {reads_with_ge1_tag_or_flank_hit: "reads with a utag or primer-flank hit", unique_patterns: "unique read patterns",
+  barbell_seconds: "barbell time (s)", unexpected_or_unparsed_files: "unexpected or unparsed files", ont_bins_found: "ONT bins found",
+  ont_bins_processed: "ONT bins processed", reads_in_ont_bins: "reads in ONT bins"};
+const mname = k => MNAME[k] || k.replace(/_/g, " ");
+function metricRows() {                     // [[group, [[key, name, vals, isPct], ...]], ...]
   const rows = [], keys = [];
-  R.forEach(r => Object.keys(r.summary).forEach(k => keys.includes(k) || keys.push(k)));
-  rows.push(["sec", "run summary"]);
-  for (const k of keys) { rows.push([k, k, R.map(r => r.summary[k]), false]);
-    if (isPctRow(k) && k !== "total_reads") rows.push([k, k + " %", R.map(r => r.summary[k] === undefined ? undefined : pc(r.summary[k], r.summary.total_reads)), true]); }
-  if (R.some(r => Object.keys(r.found).length)) { rows.push(["sec", "tags found per read"]);
-    for (const k of fk) { rows.push([k, D.foundLabels[k], R.map(r => r.found[k]), false]);
-      rows.push([k, D.foundLabels[k] + " %", R.map(r => r.found[k] === undefined ? undefined : pc(r.found[k], Object.values(r.found).reduce((a, b) => a + b, 0))), true]); } }
-  rows.push(["sec", "run"]);
-  rows.push(["unique_patterns", "unique read patterns", R.map(r => r.unique_patterns ?? undefined), false]);
-  rows.push(["barbell_seconds", "barbell time (s)", R.map(r => r.barbell_seconds), false]);
-  rows.push(["warnings", "warnings", R.map(r => r.warnings.length), false]);
-  return rows;
+  C.forEach(r => Object.keys(r.summary).forEach(k => keys.includes(k) || keys.push(k)));
+  for (const k of keys.filter(k => !k.startsWith("pattern_reads_"))) {   // pattern_reads_* = the tags found per read counts
+    const pcts = C.map(r => r.summary[k] === undefined ? undefined : pc(r.summary[k], r.summary.total_reads));
+    const share = isPctRow(k) && k !== "total_reads" ? pcts.map(v => v == null ? null : v / 100)
+      : k === "samples_with_reads" ? C.map(r => r.summary.samples_expected ? r.summary[k] / r.summary.samples_expected : null) : null;
+    rows.push([k, mname(k), C.map(r => r.summary[k]), false, share]);
+    if (isPctRow(k) && k !== "total_reads") rows.push([k, "% of total reads", pcts, true, share]); }
+  if (C.some(r => Object.keys(r.found).length))
+    for (const k of fk) { const pcts = C.map(r => r.found[k] === undefined ? undefined : pc(r.found[k], Object.values(r.found).reduce((a, b) => a + b, 0)));
+      const share = pcts.map(v => v == null ? null : v / 100);
+      rows.push(["found:" + k, D.foundLabels[k], C.map(r => r.found[k]), false, share]);
+      rows.push(["found:" + k, "% of reads with a hit", pcts, true, share]); }
+  rows.push(["unique_patterns", mname("unique_patterns"), C.map(r => r.unique_patterns ?? undefined), false]);
+  rows.push(["barbell_seconds", mname("barbell_seconds"), C.map(r => r.barbell_seconds), false]);
+  rows.push(["warnings", "warnings", C.map(r => r.warnings.length), false]);
+  const groups = MGROUPS.map(([t]) => [t, []]).concat([["other", []]]);
+  for (const row of rows) { const i = MGROUPS.findIndex(([, f]) => f(row[0])); groups[i < 0 ? groups.length - 1 : i][1].push(row); }
+  return groups.filter(g => g[1].length);
 }
 function drawMetrics() {
-  const bi = R.findIndex(r => r.label === base), diffOnly = $("diffOnly").checked, showPct = $("showPct").checked;
-  let h = `<tr><th>metric</th>${R.map(r => `<th>${esc(r.label)}${r.label === base ? ' <span class="base">●</span>' : ""}</th>`).join("")}</tr>`;
-  let pendingSec = null;
-  for (const row of metricRows()) {
-    if (row[0] === "sec") { pendingSec = row[1]; continue; }
-    const [key, name, vals, isPct] = row;
-    if (isPct && !showPct) continue;
-    const defined = vals.filter(v => v !== undefined && v !== null);
-    if (diffOnly && defined.every(v => Math.abs(v - defined[0]) < (isPct ? 0.05 : 1e-9))) continue;
-    if (pendingSec) { h += `<tr class="sec"><td colspan="${R.length + 1}">${esc(pendingSec)}</td></tr>`; pendingSec = null; }
-    const b = vals[bi];
-    h += `<tr><td>${esc(name)}</td>` + vals.map((v, i) => { let cell = v === undefined || v === null ? "–" : (isPct ? pf(v) : fmt(v));
-      if (i !== bi && v !== undefined && v !== null && b !== undefined && b !== null) { const d = v - b;
-        if (Math.abs(d) >= (isPct ? 0.05 : 1e-9)) { const sameTotal = R[i].summary.total_reads === R[bi].summary.total_reads;
-          const dir = !isPct && !sameTotal ? "neu" : GOOD_UP.has(key) ? (d > 0 ? "up" : "down") : GOOD_DOWN.has(key) ? (d < 0 ? "up" : "down") : "neu";
-          const rel = !isPct && b ? ` ${d > 0 ? "+" : ""}${(100 * d / b).toFixed(1)}%` : "";
-          cell += `<span class="d ${dir}">${d > 0 ? "▲" : "▼"} ${d > 0 ? "+" : ""}${isPct ? d.toFixed(1) + " pt" : fmt(Math.round(d * 10) / 10) + rel}</span>`; } }
-      return `<td>${cell}</td>`; }).join("") + "</tr>"; }
-  $("metrics").innerHTML = h;
-  $("sub").textContent = `${R.length} runs · generated ${D.generated} · baseline ${base} · ▲▼ = difference to the baseline (green better, red worse, gray neutral; read counts are gray when the total reads differ)`;
+  const diffOnly = $("diffOnly").checked, showPct = $("showPct").checked;
+  const head = `<tr><th>metric</th>${C.map(r => `<th>${esc(r.label)}</th>`).join("")}</tr>`;
+  $("metrics").classList.toggle("cols2", SINGLE && C.length === 1);      // demux: one value column, groups side by side
+  const cw = 110, cols = `<colgroup><col style="width:280px">${C.map(() => `<col style="width:${cw}px">`).join("")}</colgroup>`;
+  let out = "";
+  for (const [title, rows] of metricRows()) {
+    let h = "";
+    for (const [rkey, name, vals, isPct, share] of rows) {
+      if (isPct && !showPct) continue;
+      const defined = vals.filter(v => v !== undefined && v !== null);
+      if (diffOnly && defined.every(v => Math.abs(v - defined[0]) < (isPct ? 0.05 : 1e-9))) continue;
+      h += `<tr class="${isPct ? "prow" : ""}"><td class="${isPct ? "pr" : ""}" title="${esc(rkey)}">${esc(name)}</td>` + vals.map((v, i) => { let cell = v === undefined || v === null ? "–" : (isPct ? pf(v) : fmt(v));
+        if (share && share[i] != null && v != null) cell = `<span class="cell" style="${shade(share[i])}">${cell}</span>`;
+        return `<td>${cell}</td>`; }).join("") + "</tr>"; }
+    if (h) out += `<div class="mg"><h3>${esc(title)}</h3><div class="scroll"><table style="width:${280 + C.length * cw}px">${cols}${head}${h}</table></div></div>`;
+  }
+  if (P2small.length) out += `<div class="mg note">${P2small.length} small ONT bin(s) not shown as columns (< ${fmt(Math.round(minBin))} reads; counted in all bins): ` +
+    `${P2small.map(b => esc(b.label) + " " + fmt(b.summary.total_reads || 0)).join(", ")}</div>`;
+  $("metrics").innerHTML = out;
+  $("sub").textContent = subLine();
 }
-$("baseSel").innerHTML = R.map(r => `<option ${r.label === base ? "selected" : ""}>${esc(r.label)}</option>`).join("");
-$("baseSel").onchange = e => { base = e.target.value; drawMetrics(); };
 $("diffOnly").onchange = drawMetrics; $("showPct").onchange = drawMetrics;
 drawMetrics();
 
@@ -579,31 +629,113 @@ function heat(f) { const i = f <= 0 ? 0 : Math.min(5, 1 + Math.floor(f * 5 / 0.4
 function drawPats() {
   if (!D.patterns.length) { $("patPanel").classList.add("hidden"); return; }
   const mode = $("patMode").value;
-  const tot = R.map(r => Object.values(r.found).reduce((a, b) => a + b, 0) || Object.values(r.patterns).reduce((a, b) => a + b, 0) || 1);
-  let h = `<tr><th>pattern</th>${R.map(r => `<th>${esc(r.label)}</th>`).join("")}</tr>`;
-  for (const p of D.patterns) { h += `<tr><td class="pat">${esc(p)}</td>` + R.map((r, i) => { const n = r.patterns[p];
+  const tot = C.map(r => Object.values(r.found).reduce((a, b) => a + b, 0) || Object.values(r.patterns).reduce((a, b) => a + b, 0) || 1);
+  let h = `<tr><th>pattern</th>${C.map(r => `<th>${esc(r.label)}</th>`).join("")}</tr>`;
+  for (const p of D.patterns) { h += `<tr><td class="pat">${esc(p)}</td>` + C.map((r, i) => { const n = r.patterns[p];
       if (n === undefined) return `<td><span class="neu">–</span></td>`; const f = n / tot[i];
       return `<td><span class="cell" style="${heat(f)}" title="${fmt(n)} reads">${mode === "share" ? pf(100 * f) : fmt(n)}</span></td>`; }).join("") + "</tr>"; }
-  $("pats").innerHTML = h + `<tr><td colspan="${R.length + 1}" class="neu" style="text-align:left;white-space:normal;font-size:11px">Only the top patterns are in a log; – = not in that run's top list.</td></tr>`;
+  $("pats").innerHTML = h + `<tr><td colspan="${C.length + 1}" class="neu" style="text-align:left;white-space:normal;font-size:11px">Only the top patterns are in a log; – = not in that run's top list.</td></tr>`;
 }
 $("patMode").onchange = drawPats; drawPats();
 
 // ---- ONT bins
-const bins = [...new Set(R.flatMap(r => Object.keys(r.bins)))].sort();
-function drawBins() {
-  const mode = $("binMode").value, br = R.filter(r => Object.keys(r.bins).length);
-  let h = `<tr><th>ONT bin</th>${br.map(r => `<th>${esc(r.label)}</th>`).join("")}</tr>`;
-  for (const b of bins) { h += `<tr><td>${esc(b)}</td>` + br.map(r => { const x = r.bins[b]; if (!x) return `<td class="neu">–</td>`;
-      if (mode === "pct") { const f = x.reads ? x.assigned / x.reads : 0; return `<td><span class="cell" style="${heat(f * 0.4)}">${x.reads ? pf(100 * f) : "–"}</span></td>`; }
-      if (mode === "samples") return `<td>${x.samples_with_reads === undefined ? "–" : fmt(x.samples_with_reads) + " / " + fmt(x.samples_expected)}</td>`;
-      return `<td>${fmt(x[mode])}</td>`; }).join("") + "</tr>"; }
+// bins matched across runs by their number (NB01 = barcode01, as in the sample sheet); row label = all names used
+const binKey = b => { const m = /(\d+)$/.exec(b); return m ? "#" + +m[1] : b; };
+const binRows = new Map();
+R.forEach(r => Object.keys(r.bins).forEach(b => { const k = binKey(b); if (!binRows.has(k)) binRows.set(k, new Set()); binRows.get(k).add(b); }));
+const bins = [...binRows.keys()].sort((a, b) => a.localeCompare(b, undefined, {numeric: true}));
+const binOfRun = (r, k) => { const n = Object.keys(r.bins).find(b => binKey(b) === k); return n ? r.bins[n] : undefined; };
+function drawBins() {                     // one row per bin; reads, hits, assigned, assigned %, samples (per run)
+  const br = R.filter(r => Object.keys(r.bins).length), multi = br.length > 1;
+  const cols = ["reads in bin", "with hit", "assigned", "assigned %", "samples with reads"];
+  let h = multi ? `<tr><th></th>${br.map(r => `<th colspan="${cols.length}" style="text-align:center;border-bottom:1px solid var(--axis)">${esc(r.label)}</th>`).join("")}</tr>` : "";
+  h += `<tr><th>ONT bin</th>${br.map(() => cols.map(c => `<th>${c}</th>`).join("")).join("")}</tr>`;
+  for (const b of bins) { h += `<tr><td>${esc([...binRows.get(b)].join(" · "))}</td>` + br.map(r => { const x = binOfRun(r, b);
+      if (!x) return cols.map(() => `<td class="neu">–</td>`).join("");
+      const f = x.reads ? x.assigned / x.reads : null, sf = x.samples_expected ? x.samples_with_reads / x.samples_expected : null;
+      return `<td>${fmt(x.reads)}</td><td>${fmt(x.with_hit)}</td><td>${fmt(x.assigned)}</td>` +
+        `<td>${f === null ? "–" : `<span class="cell" style="${shade(f)}">${pf(100 * f)}</span>`}</td>` +
+        `<td>${x.samples_with_reads === undefined ? "–" : `<span class="cell" style="${sf === null ? "" : shade(sf)}">${fmt(x.samples_with_reads)} / ${fmt(x.samples_expected)}</span>`}</td>`; }).join("") + "</tr>"; }
   $("bins").innerHTML = h;
 }
-if (bins.length) { $("binPanel").classList.remove("hidden"); $("binMode").onchange = drawBins; drawBins(); }
+if (bins.length) { $("binPanel").classList.remove("hidden"); drawBins(); }
 
 // ---- samples
 const SR = R.filter(r => r.samples);
-if (SR.length) {
+if (SR.length === 1) {                      // one run: samples ranked by reads, and how even they are
+  $("smpPanel").classList.remove("hidden");
+  const X = SR[0], ALL = Object.entries(X.samples).map(([k, v]) => ({k, v}));
+  let all = ALL, tot = 0;
+  const setBin = b => { all = b ? ALL.filter(p => p.k.startsWith(b + "/")) : ALL; tot = all.reduce((a, p) => a + p.v, 0); };
+  const sbins = X.subcommand === "twopass" ? [...new Set(ALL.map(p => p.k.split("/")[0]).filter((b, i, a) => ALL[i].k.includes("/")))].sort() : [];
+  if (sbins.length > 1) {                   // twopass: one ONT bin or all of them
+    $("smpPanel").querySelector("h2 .ctl").insertAdjacentHTML("afterbegin",
+      `<label>ONT bin <select id="sbin"><option value="">all bins</option>${sbins.map(b => `<option>${esc(b)}</option>`).join("")}</select></label>`);
+    $("sbin").onchange = () => { setBin($("sbin").value); drawRank(); };
+  }
+  setBin("");
+  // sort shared by the table (click a header) and the plot: reads, sample name, or plate and well (row-major)
+  const srt = {key: "reads", dir: -1}, WRE = /^([A-Pa-p])0?(\d{1,2})$/;
+  const wellKey = p => { const mm = D.meta[p.k] || [], w = WRE.exec(mm[1] || "");
+    return [mm[0] || "~", w ? w[1].toUpperCase().charCodeAt(0) : 999, w ? +w[2] : 999]; };
+  const cmp = (a, b) => { let d;
+    if (srt.key === "reads") d = a.v - b.v;
+    else if (srt.key === "name") d = a.k.localeCompare(b.k, undefined, {numeric: true});
+    else { const x = wellKey(a), y = wellKey(b); d = x[0].localeCompare(y[0], undefined, {numeric: true}) || x[1] - y[1] || x[2] - y[2]; }
+    return srt.dir * d || a.k.localeCompare(b.k, undefined, {numeric: true}); };
+  const shownRows = () => { const fq = $("q").value.toLowerCase(); return all.filter(p => p.k.toLowerCase().includes(fq)).sort(cmp); };
+  const q = (a, f) => { const s = [...a].sort((x, y) => x - y), i = (s.length - 1) * f, lo = Math.floor(i); return s.length ? s[lo] + (s[Math.min(s.length - 1, lo + 1)] - s[lo]) * (i - lo) : 0; };
+  let med = 0;
+  function drawRank() {                     // statistics over the ONT bin; plot and table follow the filter and sort
+    const v = all.map(p => p.v).sort((a, b) => b - a), n = v.length;
+    med = q(v, .5);
+    const mean = tot / Math.max(1, n), sd = Math.sqrt(v.reduce((a, x) => a + (x - mean) ** 2, 0) / Math.max(1, n)), with0 = v.filter(x => !x).length;
+    const within2 = med ? v.filter(x => x >= med / 2 && x <= med * 2).length : 0, p10 = q(v, .1), p90 = q(v, .9);
+    $("sstat").innerHTML = `${fmt(n)} samples · ${fmt(n - with0)} with reads${with0 ? ` · <span style="color:var(--bad)">${fmt(with0)} with 0</span>` : ""} · ` +
+      `median ${fmt(Math.round(med))} · mean ${fmt(Math.round(mean))} · min ${fmt(v[n - 1] ?? 0)} · max ${fmt(v[0] ?? 0)} · CV ${mean ? (sd / mean).toFixed(2) : "–"} · ` +
+      `90th / 10th percentile ${p10 ? (p90 / p10).toFixed(1) + "×" : "–"} · within 2× of the median ${pf(pc(within2, n))}`;
+    drawSorted();
+  }
+  function drawSorted() { const rows = shownRows(); drawPlot(rows); drawRankTable(rows); }
+  function drawPlot(rows) {
+    const log = $("scale").value === "log", n = rows.length;
+    const W = 560, H = 360, m = {l: 58, r: 14, t: 12, b: 42}, pw = W - m.l - m.r, ph = H - m.t - m.b, mx = Math.max(1, ...all.map(p => p.v));
+    const tf = x => log ? Math.log10(x + 1) : x, tmax = tf(mx) * 1.04, sx = i => m.l + pw * (i + .5) / Math.max(1, n), sy = x => m.t + ph - ph * tf(x) / tmax;
+    let svg = `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="reads per sample">`;
+    const ticks = log ? [0, 1, 10, 100, 1e3, 1e4, 1e5, 1e6, 1e7].filter(t => t <= mx * 1.05) : [0, .25, .5, .75, 1].map(f => Math.round(f * mx));
+    for (const t of ticks) svg += `<line x1="${m.l}" x2="${W - m.r}" y1="${sy(t)}" y2="${sy(t)}" stroke="var(--grid)"/><text x="${m.l - 6}" y="${sy(t) + 4}" text-anchor="end">${fmt(t)}</text>`;
+    for (const [f, lab] of [[1, "median"], [2, "2× median"], [.5, "½× median"]]) { if (!med) break; const y = sy(med * f);
+      if (y < m.t || y > m.t + ph) continue;
+      svg += `<line x1="${m.l}" x2="${W - m.r}" y1="${y}" y2="${y}" stroke="var(--axis)" stroke-dasharray="${lab === "median" ? "" : "4 4"}"/><text x="${W - m.r - 4}" y="${y - 4}" text-anchor="end">${lab}</text>`; }
+    const order = srt.key === "reads" ? (srt.dir < 0 ? "most reads first" : "fewest reads first") : srt.key === "name" ? "by name" : "by plate and well";
+    svg += `<text x="${m.l + pw / 2}" y="${H - 6}" text-anchor="middle" style="fill:var(--ink)">samples, ${order} (${fmt(n)})</text>`;
+    svg += `<text transform="translate(14 ${m.t + ph / 2}) rotate(-90)" text-anchor="middle" style="fill:var(--ink)">reads</text>`;
+    const bw = Math.max(1, pw / Math.max(1, n) - (n > 150 ? 0 : 1));
+    rows.forEach((p, i) => { const y = sy(p.v);
+      svg += `<rect x="${(sx(i) - bw / 2).toFixed(1)}" y="${y.toFixed(1)}" width="${bw.toFixed(2)}" height="${Math.max(0, m.t + ph - y).toFixed(1)}" fill="${p.v ? "var(--s1)" : "var(--bad)"}" data-k="${esc(p.k)}"/>`;
+      if (!p.v) svg += `<rect x="${(sx(i) - bw / 2).toFixed(1)}" y="${m.t + ph - 3}" width="${bw.toFixed(2)}" height="3" fill="var(--bad)"/>`; });
+    $("scatter").innerHTML = svg + "</svg>";
+    $("scatter").querySelectorAll("rect[data-k]").forEach(el => { const p = all.find(x => x.k === el.dataset.k), mm = D.meta[p.k] || [];
+      el.addEventListener("mousemove", e => showTip(e, `<b>${esc(p.k)}</b><br>${fmt(p.v)} reads · ${pf(pc(p.v, tot))} of assigned` +
+        (med ? ` · ${(p.v / med).toFixed(2)}× median` : "") + (mm[1] ? `<br><span class="t">${esc(mm[0])} ${esc(mm[1])} · utags ${esc(mm[2])} / ${esc(mm[3])}</span>` : "")));
+      el.addEventListener("mouseleave", hideTip); });
+  }
+  function drawRankTable(rows) {
+    const shown = rows.slice(0, 500), arrow = k => srt.key === k ? (srt.dir < 0 ? " ▼" : " ▲") : "";
+    const th = (k, lab) => `<th class="sortable" data-s="${k}">${lab}${arrow(k)}</th>`;
+    $("stab").innerHTML = `<tr>${th("name", "sample")}${th("well", "plate · well")}${th("reads", "reads")}${th("reads", "% of assigned")}${th("reads", "× median")}</tr>` +
+      shown.map(p => { const mm = D.meta[p.k] || [], r = med ? p.v / med : null;
+        return `<tr><td>${esc(p.k)}</td><td>${esc([mm[0], mm[1]].filter(Boolean).join(" · "))}</td><td>${fmt(p.v)}</td><td>${pf(pc(p.v, tot))}</td>` +
+          `<td class="${r === null ? "neu" : r < .5 || r > 2 ? "down" : ""}">${r === null ? "–" : r.toFixed(2)}</td></tr>`; }).join("") +
+      (rows.length > 500 ? `<tr><td colspan="5" class="neu">${fmt(rows.length - 500)} more – use the filter</td></tr>` : "");
+  }
+  $("stab").addEventListener("click", e => { const h = e.target.closest("th[data-s]"); if (!h) return; const k = h.dataset.s;
+    srt.dir = srt.key === k ? -srt.dir : k === "reads" ? -1 : 1; srt.key = k; drawSorted(); });
+  $("sortBy").classList.add("multi");
+  $("scale").onchange = drawSorted;
+  $("q").oninput = drawSorted;
+  drawRank();
+} else if (SR.length) {
   $("smpPanel").classList.remove("hidden");
   const opts = SR.map((r, i) => `<option value="${i}">${esc(r.label)}</option>`).join("");
   $("sx").innerHTML = opts; $("sy").innerHTML = opts;
@@ -660,17 +792,29 @@ if (SR.length) {
 // ---- negative controls: wells marked in the page, analysed per run (selection kept in this browser only)
 if (SR.length) (() => {
   $("negPanel").classList.remove("hidden");
-  const M = D.meta, keys = [...new Set(SR.flatMap(r => Object.keys(r.samples)))];
-  const SKEY = "compare-runs:neg:" + document.title + ":" + keys.length;
+  const M = D.meta, KEYS = [...new Set(SR.flatMap(r => Object.keys(r.samples)))];
+  let keys = KEYS;                          // the wells analysed: all, or one ONT bin of a twopass run
+  const SKEY = "compare-runs:neg:" + document.title + ":" + KEYS.length;
   let st = {}; try { st = JSON.parse(localStorage.getItem(SKEY) || "{}") || {}; } catch (e) {}
   const save = () => { try { localStorage.setItem(SKEY, JSON.stringify(st)); } catch (e) {} };
   let mode = "neg";
   const stateOf = k => st[k] || "pos";
   // plates from the summary.tsv plate/well columns; samples without a well go into an "other" panel
   const WRE = /^([A-Pa-p])0?(\d{1,2})$/, panels = new Map();
-  for (const k of keys) { const m = M[k] || [], pw = WRE.exec(m[1] || ""), pn = pw && m[0] ? m[0] : "other";
-    if (!panels.has(pn)) panels.set(pn, []);
-    panels.get(pn).push({k, r: pw ? pw[1].toUpperCase().charCodeAt(0) - 65 : -1, c: pw ? +pw[2] - 1 : -1}); }
+  function buildPanels() { panels.clear();
+    for (const k of keys) { const m = M[k] || [], pw = WRE.exec(m[1] || ""), pn = pw && m[0] ? m[0] : "other";
+      if (!panels.has(pn)) panels.set(pn, []);
+      panels.get(pn).push({k, r: pw ? pw[1].toUpperCase().charCodeAt(0) - 65 : -1, c: pw ? +pw[2] - 1 : -1}); } }
+  // twopass: each ONT bin is its own set of wells, so negatives are analysed per bin (marks are kept for all bins)
+  const nbins = SINGLE && SR[0].subcommand === "twopass" ? [...new Set(KEYS.filter(k => k.includes("/")).map(k => k.split("/")[0]))].sort() : [];
+  if (nbins.length > 1) {
+    $("negPanel").querySelector("h2 .ctl").insertAdjacentHTML("afterbegin",
+      `<label>ONT bin <select id="nbin">${nbins.map(b => `<option>${esc(b)}</option>`).join("")}<option value="">all bins</option></select></label>`);
+    keys = KEYS.filter(k => k.startsWith(nbins[0] + "/"));
+    $("nbin").onchange = () => { const b = $("nbin").value; keys = b ? KEYS.filter(k => k.startsWith(b + "/")) : KEYS;
+      buildPanels(); drawPlates(); analyse(); };
+  }
+  buildPanels();
   const RAMP = ["#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b"].map(h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16)));
   function ramp(t) { t = Math.max(0, Math.min(1, t)) * (RAMP.length - 1); const i = Math.min(RAMP.length - 2, Math.floor(t)), f = t - i;
     return "rgb(" + RAMP[i].map((v, j) => Math.round(v + (RAMP[i + 1][j] - v) * f)).join(",") + ")"; }
@@ -678,11 +822,14 @@ if (SR.length) (() => {
   $("ncol").value = Math.max(0, SR.findIndex(r => r.label === D.base));
 
   function drawPlates() {
-    let h = "";
+    let h = "", grp = null;                 // twopass plates (<bin>/<plate>): one row of plates per ONT bin
+    const binOf = pn => pn.includes("/") ? pn.slice(0, pn.indexOf("/")) : "";
     [...panels.entries()].sort((a, b) => a[0] === "other" ? 1 : b[0] === "other" ? -1 : a[0].localeCompare(b[0], undefined, {numeric: true})).forEach(([pn, ws], pi) => {
+      const bin = pn === "other" ? "" : binOf(pn);
+      if (bin !== grp) { h += (grp !== null ? "</div></div>" : "") + `<div class="bgrp">${bin ? `<div class="bt">${esc(bin)}</div>` : ""}<div class="plates">`; grp = bin; }
       const nr = pn === "other" ? 0 : Math.max(8, ...ws.map(w => w.r + 1)), nc = pn === "other" ? 0 : Math.max(12, ...ws.map(w => w.c + 1));
       const cs = nc > 12 ? 11 : 16, nN = ws.filter(w => stateOf(w.k) === "neg").length, nE = ws.filter(w => stateOf(w.k) === "exc").length;
-      h += `<div class="pl" data-p="${pi}"><div class="pt" data-act="plate">${esc(pn)}<small>${nN ? nN + " neg" : ""}${nN && nE ? " · " : ""}${nE ? nE + " excl" : ""}</small></div>`;
+      h += `<div class="pl" data-p="${pi}"><div class="pt" data-act="plate" title="${esc(pn)}">${esc(bin ? pn.slice(bin.length + 1) : pn)}<small>${nN ? nN + " neg" : ""}${nN && nE ? " · " : ""}${nE ? nE + " excl" : ""}</small></div>`;
       if (pn === "other") { h += `<div class="pg" style="--cs:${cs}px;grid-template-columns:repeat(24,${cs}px)">` + ws.map(w => `<div class="w" data-k="${esc(w.k)}"></div>`).join("") + "</div></div>"; return; }
       const at = new Map(ws.map(w => [w.r + "_" + w.c, w]));
       h += `<div class="pg" style="--cs:${cs}px;grid-template-columns:12px repeat(${nc},${cs}px)"><div></div>`;
@@ -691,7 +838,7 @@ if (SR.length) (() => {
         for (let c = 0; c < nc; c++) { const w = at.get(r + "_" + c); h += w ? `<div class="w" data-k="${esc(w.k)}" data-r="${r}" data-c="${c}"></div>` : `<div class="w none"></div>`; } }
       h += "</div></div>";
     });
-    $("nplates").innerHTML = h; paint();
+    $("nplates").innerHTML = h + (grp !== null ? "</div></div>" : ""); paint();
   }
   function paint() {
     const run = SR[+$("ncol").value], mx = Math.max(1, ...Object.values(run.samples));
@@ -841,7 +988,7 @@ if (SR.length) (() => {
     for (const k of keys) if (stateOf(k) !== "pos") lines.push(q(k) + "," + (stateOf(k) === "neg" ? "negative" : "excluded"));
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([lines.join("\n") + "\n"], {type: "text/csv"}));
-    a.download = "negative_controls.csv"; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    a.download = `negative_controls${$("nbin") && $("nbin").value ? "_" + $("nbin").value : ""}.csv`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   };
   drawPlates(); analyse();
 })();
@@ -852,7 +999,10 @@ $("cmds").innerHTML = R.map(r => `<details ${r.status !== "ok" ? "open" : ""} st
   ${Object.keys(r.steps).length ? `<div class="stat">${Object.entries(r.steps).map(([s, t]) => `${esc(s)} <b>${t.toFixed(1)} s</b>`).join(" · ")}</div>` : ""}
   ${r.info.map(s => `<div class="stat">• ${esc(s)}</div>`).join("")}
   ${r.warnings.map(s => `<div class="warn">${esc(s)}</div>`).join("")}
-  ${r.errors.map(s => `<div class="err mono">${esc(s)}</div>`).join("")}</div></details>`).join("");
+  ${r.errors.map(s => `<div class="err mono">${esc(s)}</div>`).join("")}
+  ${(r.pass2 || []).map(b => `<div class="stat"><b style="color:var(--ink)">pass 2 · ${esc(b.label)}</b> <span class="badge ${b.status}">${b.status}</span>` +
+      ` · barbell ${b.barbell_seconds.toFixed(1)} s</div>` + b.warnings.map(s => `<div class="warn">${esc(s)}</div>`).join("") +
+      b.errors.map(s => `<div class="err mono">${esc(s)}</div>`).join("")).join("")}</div></details>`).join("");
 </script></body></html>
 """
 
