@@ -548,7 +548,7 @@ const hideTip = () => tip.style.display = "none";
 const SINGLE = R.length === 1;              // one run: a run summary, nothing to compare against
 if (SINGLE) document.body.classList.add("single");
 const subLine = () => SINGLE
-  ? `${R[0].subcommand || "run"}${/\s--dorado\b/.test(R[0].command) ? " --dorado" : ""}${/\s--pass1-only\b/.test(R[0].command) ? " --pass1-only" : ""}${R[0].context ? " -c " + R[0].context : ""}${R[0].kit ? " -k " + R[0].kit : ""} · started ${R[0].started} · ${R[0].log} · generated ${D.generated}`
+  ? `${R[0].subcommand || "run"}${/\s--dorado\b/.test(R[0].command) ? " --dorado" : ""}${/\s--pass1-only\b/.test(R[0].command) ? " --pass1-only" : ""}${R[0].context ? " -c " + R[0].context : ""}${R[0].kit ? " -k " + R[0].kit : ""} · started ${R[0].started} · generated ${D.generated}`
   : `${R.length} runs · generated ${D.generated}`;
 $("sub").textContent = subLine();
 // columns of the run views: the runs, or for one twopass run "all bins" + each ONT bin (pass 2)
