@@ -433,7 +433,7 @@ table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}
 th,td{padding:4px 8px;border-bottom:1px solid var(--grid);text-align:right;white-space:nowrap}
 th{color:var(--dim);font-weight:600;position:sticky;top:0;background:var(--panel)}
 th:first-child,td:first-child{text-align:left}
-td.pat{font-family:ui-monospace,Menlo,monospace;font-size:11.5px}
+td.pat{font-family:ui-monospace,Menlo,monospace;font-size:11.5px;text-align:left}th.pat{text-align:left}
 tr.sec td{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.05em;padding-top:12px;border-bottom:none}
 .d{font-size:11px;margin-left:6px}.up{color:var(--good)}.down{color:var(--bad)}.neu{color:var(--muted)}
 th.sortable{cursor:pointer}th.sortable:hover{color:var(--ink)}
@@ -469,24 +469,22 @@ details summary{cursor:pointer;color:var(--dim)}
 .w.neg::after{content:"";position:absolute;inset:30%;border-radius:50%;background:var(--panel)}
 .w.exc{opacity:.3;background-image:repeating-linear-gradient(45deg,transparent 0 2px,var(--panel) 2px 3.5px)}
 .w.pre{outline:2px solid var(--ink);outline-offset:0}
-.kpi td.b{font-weight:600}
+.kpi td.b{font-weight:600}table.kpi{width:auto}.kpi th:first-child,.kpi td:first-child{min-width:280px}
+.kpi th:not(:first-child),.kpi td:not(:first-child){min-width:110px}   /* numbers next to the metric, as in the metrics table */
+table.narrow{width:auto}.narrow th:first-child,.narrow td:first-child{min-width:160px}.narrow th:not(:first-child),.narrow td:not(:first-child){min-width:90px}
 .p1m{font-size:14px;font-weight:600}.p1m .tag{display:inline-block;font-size:11px;font-weight:600;padding:1px 8px;border-radius:9px;margin-right:8px;
   background:var(--hbg);color:var(--hink);vertical-align:1px}.p1l{color:var(--dim);margin-top:3px}.p1l.pw::before{content:"! ";color:var(--s4);font-weight:700}
-#metrics{display:grid;gap:14px}#metrics.cols2{display:block;column-count:2;column-gap:32px}
-#metrics.cols2 .mg{break-inside:avoid;margin:0 0 14px}@media (max-width:900px){#metrics.cols2{column-count:1}}
-#metrics td .cell{display:inline-block;min-width:64px}
-#metrics .mg{margin:0}#metrics .mg h3{margin:0 0 2px;font-size:11px;font-weight:650;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
-#metrics table{table-layout:fixed;width:auto}   /* fixed widths (colgroup): numbers next to the names, same columns in every group */
-#metrics td:first-child{white-space:normal}#metrics td.pr{color:var(--muted);padding-left:22px}#metrics tr.prow td{color:var(--muted);font-size:12px}
+#metrics table.term{width:auto}   /* laid out as the terminal run summary */
+.term th:first-child,.term td:first-child{padding-right:24px}.term th.run{text-align:center;color:var(--ink)}
+.term td.of{color:var(--dim)}.term td.gap,.term th.gap{padding-right:18px}
 .note{color:var(--muted);font-size:11.5px;margin-top:6px;line-height:1.5}
-.lowlist button{padding:0 6px;font-size:11px}
 </style></head><body>
 <header><h1>__TITLE__</h1><div class="sub" id="sub"></div></header>
 <main>
   <section class="panel hidden" id="p1Panel"><h2>Pass 1: ONT barcodes</h2><div id="p1"></div></section>
   <section class="panel"><h2>Metrics<span class="ctl">
       <label class="multi"><input type="checkbox" id="diffOnly"> differences only</label>
-      <label><input type="checkbox" id="showPct" checked> show % rows</label></span></h2>
+      <label><input type="checkbox" id="showPct" checked> show % of total</label></span></h2>
     <div id="metrics"></div></section>
   <section class="panel" id="patPanel"><h2>Top read patterns<span class="ctl">
       <label><select id="patMode"><option value="share">share of reads with a hit</option><option value="reads">reads</option></select></label></span></h2>
@@ -565,57 +563,26 @@ if (R.some(r => r.pass1)) {
 }
 
 // ---- metrics table
-// background by share (0..1), the blue steps of the top read patterns table (--q0..--q5)
+// background by share (0..1), the blue steps of the top read patterns table (--q0..--q5); metrics % and ONT bins tables
 const shade = f => { const i = f <= 0 ? 0 : Math.min(5, 1 + Math.floor(f * 5)); return `background:var(--q${i});${i >= 4 ? "color:#fff" : ""}`; };
 const isPctRow = k => /^(reads|pattern_reads|unexpected_reads)/.test(k);
-// groups of the metrics table: [title, test on the metric key]; keys that fit none go into "other"
-const MGROUPS = [["reads", k => /^(total_reads|reads_in_ont_bins|reads_with_ge1_tag_or_flank_hit|reads_assigned_to_samples)$/.test(k)],
-  ["samples and ONT bins", k => /^(samples_|ont_bins_)/.test(k)], ["tags found per read", k => k.startsWith("found:")],
-  ["unexpected reads and decoys", k => /^(unexpected_|decoy_)/.test(k)],
-  ["run", k => /^(unique_patterns|barbell_seconds|warnings)$/.test(k)]];
-const MNAME = {reads_with_ge1_tag_or_flank_hit: "reads with a utag or primer-flank hit", unique_patterns: "unique read patterns",
-  barbell_seconds: "barbell time (s)", unexpected_or_unparsed_files: "unexpected or unparsed files", ont_bins_found: "ONT bins found",
-  ont_bins_processed: "ONT bins processed", reads_in_ont_bins: "reads in ONT bins"};
-const mname = k => MNAME[k] || k.replace(/_/g, " ");
-function metricRows() {                     // [[group, [[key, name, vals, isPct], ...]], ...]
-  const rows = [], keys = [];
-  C.forEach(r => Object.keys(r.summary).forEach(k => keys.includes(k) || keys.push(k)));
-  for (const k of keys.filter(k => !k.startsWith("pattern_reads_"))) {   // pattern_reads_* = the tags found per read counts
-    const pcts = C.map(r => r.summary[k] === undefined ? undefined : pc(r.summary[k], r.summary.total_reads));
-    const share = isPctRow(k) && k !== "total_reads" ? pcts.map(v => v == null ? null : v / 100)
-      : k === "samples_with_reads" ? C.map(r => r.summary.samples_expected ? r.summary[k] / r.summary.samples_expected : null) : null;
-    rows.push([k, mname(k), C.map(r => r.summary[k]), false, share]);
-    if (isPctRow(k) && k !== "total_reads") rows.push([k, "% of total reads", pcts, true, share]); }
-  if (C.some(r => Object.keys(r.found).length))
-    for (const k of fk) { const pcts = C.map(r => r.found[k] === undefined ? undefined : pc(r.found[k], Object.values(r.found).reduce((a, b) => a + b, 0)));
-      const share = pcts.map(v => v == null ? null : v / 100);
-      rows.push(["found:" + k, D.foundLabels[k], C.map(r => r.found[k]), false, share]);
-      rows.push(["found:" + k, "% of reads with a hit", pcts, true, share]); }
-  rows.push(["unique_patterns", mname("unique_patterns"), C.map(r => r.unique_patterns ?? undefined), false]);
-  rows.push(["barbell_seconds", mname("barbell_seconds"), C.map(r => r.barbell_seconds), false]);
-  rows.push(["warnings", "warnings", C.map(r => r.warnings.length), false]);
-  const groups = MGROUPS.map(([t]) => [t, []]).concat([["other", []]]);
-  for (const row of rows) { const i = MGROUPS.findIndex(([, f]) => f(row[0])); groups[i < 0 ? groups.length - 1 : i][1].push(row); }
-  return groups.filter(g => g[1].length);
-}
+// the run summary as utag prints it: metric, value, % of total reads (for the read counts)
 function drawMetrics() {
-  const diffOnly = $("diffOnly").checked, showPct = $("showPct").checked;
-  const head = `<tr><th>metric</th>${C.map(r => `<th>${esc(r.label)}</th>`).join("")}</tr>`;
-  $("metrics").classList.toggle("cols2", SINGLE && C.length === 1);      // demux: one value column, groups side by side
-  const cw = 110, cols = `<colgroup><col style="width:280px">${C.map(() => `<col style="width:${cw}px">`).join("")}</colgroup>`;
-  let out = "";
-  for (const [title, rows] of metricRows()) {
-    let h = "";
-    for (const [rkey, name, vals, isPct, share] of rows) {
-      if (isPct && !showPct) continue;
-      const defined = vals.filter(v => v !== undefined && v !== null);
-      if (diffOnly && defined.every(v => Math.abs(v - defined[0]) < (isPct ? 0.05 : 1e-9))) continue;
-      h += `<tr class="${isPct ? "prow" : ""}"><td class="${isPct ? "pr" : ""}" title="${esc(rkey)}">${esc(name)}</td>` + vals.map((v, i) => { let cell = v === undefined || v === null ? "–" : (isPct ? pf(v) : fmt(v));
-        if (share && share[i] != null && v != null) cell = `<span class="cell" style="${shade(share[i])}">${cell}</span>`;
-        return `<td>${cell}</td>`; }).join("") + "</tr>"; }
-    if (h) out += `<div class="mg"><h3>${esc(title)}</h3><div class="scroll"><table style="width:${280 + C.length * cw}px">${cols}${head}${h}</table></div></div>`;
+  const diffOnly = $("diffOnly").checked, showPct = $("showPct").checked, keys = [];
+  C.forEach(r => Object.keys(r.summary).forEach(k => keys.includes(k) || keys.push(k)));
+  const ofTotal = k => k === "total_reads" || isPctRow(k);
+  const many = C.length > 1, span = showPct ? 2 : 1;
+  let h = many ? `<tr><th></th>${C.map(r => `<th class="run" colspan="${span}">${esc(r.label)}</th>`).join("")}</tr>` : "";
+  h += `<tr class="rule"><th>metric</th>${C.map(() => `<th class="${showPct ? "" : "gap"}">value</th>` + (showPct ? `<th class="gap">of total</th>` : "")).join("")}</tr>`;
+  for (const k of keys) {
+    const vals = C.map(r => r.summary[k]), defined = vals.filter(v => v !== undefined && v !== null);
+    if (diffOnly && defined.every(v => v === defined[0])) continue;
+    h += `<tr><td>${esc(k)}</td>` + C.map(r => { const v = r.summary[k], t = r.summary.total_reads;
+      return `<td class="${showPct ? "" : "gap"}">${v === undefined ? "–" : fmt(v)}</td>` +
+        (showPct ? `<td class="of gap">${v !== undefined && ofTotal(k) && t ? `<span class="cell" style="${shade(v / t)}">${pf(100 * v / t)}</span>` : ""}</td>` : ""); }).join("") + "</tr>";
   }
-  if (P2small.length) out += `<div class="mg note">${P2small.length} small ONT bin(s) not shown as columns (< ${fmt(Math.round(minBin))} reads; counted in all bins): ` +
+  let out = `<div class="scroll"><table class="term">${h}</table></div>`;
+  if (P2small.length) out += `<div class="note">${P2small.length} small ONT bin(s) not shown as columns (< ${fmt(Math.round(minBin))} reads; counted in all bins): ` +
     `${P2small.map(b => esc(b.label) + " " + fmt(b.summary.total_reads || 0)).join(", ")}</div>`;
   $("metrics").innerHTML = out;
   $("sub").textContent = subLine();
@@ -626,15 +593,33 @@ drawMetrics();
 // ---- patterns
 const qv = ["--q0", "--q1", "--q2", "--q3", "--q4", "--q5"];
 function heat(f) { const i = f <= 0 ? 0 : Math.min(5, 1 + Math.floor(f * 5 / 0.4)); return `background:var(${qv[i]});${i >= 4 ? "color:#fff" : ""}`; }
+// a pattern as a read: grey line, a block at each end where something was found (as in utag context's report);
+// F = utag-fwd (blue), R = utag-rev (orange); filled = utag, outlined = primer-flank only; the point = strand (fw right, rc left)
+function patRead(p) {
+  const W = 104, H = 16, bw = 24, y = 2, h = 12;
+  let svg = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(p)}"><rect x="0" y="${H / 2 - 1.5}" width="${W}" height="3" rx="1.5" fill="var(--axis)"/>`;
+  for (const part of p.split("__")) {
+    const m = /^(F|R)(tag|flank)\[(fw|rc)\b.*@(left|right)/.exec(part);
+    if (!m) continue;
+    const [, side, kind, strand, end] = m, col = side === "F" ? "var(--s1)" : "var(--s2)";
+    const x0 = end === "left" ? 0 : W - bw, x1 = x0 + bw, t = 6;      // arrow: body + point towards the strand
+    const pts = strand === "fw" ? [[x0, y], [x1 - t, y], [x1, y + h / 2], [x1 - t, y + h], [x0, y + h]]
+                                : [[x0 + t, y], [x1, y], [x1, y + h], [x0 + t, y + h], [x0, y + h / 2]];
+    svg += `<polygon points="${pts.map(q => q.join(",")).join(" ")}" fill="${kind === "tag" ? col : "var(--panel)"}" stroke="${col}" stroke-width="1.5"/>` +
+      `<text x="${(x0 + x1) / 2 + (strand === "fw" ? -2 : 2)}" y="${y + 9.5}" text-anchor="middle" style="font-size:9px;font-weight:700;fill:${kind === "tag" ? "#fff" : col}">${side}</text>`;
+  }
+  return svg + "</svg>";
+}
 function drawPats() {
   if (!D.patterns.length) { $("patPanel").classList.add("hidden"); return; }
   const mode = $("patMode").value;
   const tot = C.map(r => Object.values(r.found).reduce((a, b) => a + b, 0) || Object.values(r.patterns).reduce((a, b) => a + b, 0) || 1);
-  let h = `<tr><th>pattern</th>${C.map(r => `<th>${esc(r.label)}</th>`).join("")}</tr>`;
-  for (const p of D.patterns) { h += `<tr><td class="pat">${esc(p)}</td>` + C.map((r, i) => { const n = r.patterns[p];
+  let h = `<tr><th>read</th><th class="pat">pattern</th>${C.map(r => `<th>${esc(r.label)}</th>`).join("")}</tr>`;
+  for (const p of D.patterns) { h += `<tr><td style="line-height:0">${patRead(p)}</td><td class="pat">${esc(p)}</td>` + C.map((r, i) => { const n = r.patterns[p];
       if (n === undefined) return `<td><span class="neu">–</span></td>`; const f = n / tot[i];
       return `<td><span class="cell" style="${heat(f)}" title="${fmt(n)} reads">${mode === "share" ? pf(100 * f) : fmt(n)}</span></td>`; }).join("") + "</tr>"; }
-  $("pats").innerHTML = h + `<tr><td colspan="${C.length + 1}" class="neu" style="text-align:left;white-space:normal;font-size:11px">Only the top patterns are in a log; – = not in that run's top list.</td></tr>`;
+  $("pats").innerHTML = h + `<tr><td colspan="${C.length + 2}" class="neu" style="text-align:left;white-space:normal;font-size:11px">Only the top patterns are in a log; – = not in that run's top list. ` +
+    `Read: <b style="color:var(--s1)">F</b> utag-fwd, <b style="color:var(--s2)">R</b> utag-rev at that read end; filled = utag, outlined = primer-flank only; the point shows the strand (fw → , rc ←).</td></tr>`;
 }
 $("patMode").onchange = drawPats; drawPats();
 
@@ -945,9 +930,8 @@ if (SR.length) (() => {
       : "Negatives mix unused-tag wells and in-design blanks; no misassignment estimate.";
     h += `<div class="note">${nN} negative, ${nE} excluded, ${keys.length - nN - nE} positive wells. ${kindTxt} Wells with 0 reads are not called at any cutoff.</div>`;
     h += `<div class="two" style="margin-top:12px"><div><div class="legend"><span><i style="background:var(--s1)"></i>positive wells</span><span><i style="background:var(--s2)"></i>negative wells</span><span style="color:var(--muted)">│ cutoff</span></div><div id="nstrip"></div></div><div id="ntags"></div></div>`;
-    h += `<div id="nlow" style="margin-top:12px"></div>`;
     $("nres").innerHTML = h;
-    strip(S, cut); tags(); low(cut);
+    strip(S, cut); tags();
   }
   function strip(S, cut) {                // reads per well, one row per run, log scale
     const lw = Math.min(150, 12 + 7 * Math.max(...SR.map(r => r.label.length))), W = 620, rh = 44, H = SR.length * rh + 30, pw = W - lw - 16;
@@ -969,17 +953,8 @@ if (SR.length) (() => {
     for (const k of nk) { const m = M[k] || []; for (const [side, t] of [["fwd", m[2]], ["rev", m[3]]]) { if (!t) continue;
       const id = side + " " + t; if (!acc.has(id)) acc.set(id, SR.map(() => 0)); SR.forEach((r, i) => acc.get(id)[i] += r.samples[k] || 0); } }
     const rows = [...acc.entries()].sort((a, b) => b[1].reduce((x, y) => x + y, 0) - a[1].reduce((x, y) => x + y, 0)).slice(0, 12);
-    $("ntags").innerHTML = rows.length ? `<div class="note" style="margin:0 0 4px">reads in negative wells per utag (top ${rows.length})</div><div class="scroll" style="max-height:300px;overflow-y:auto"><table><tr><th>utag</th>${SR.map(r => `<th>${esc(r.label)}</th>`).join("")}</tr>` +
+    $("ntags").innerHTML = rows.length ? `<div class="note" style="margin:0 0 4px">reads in negative wells per utag (top ${rows.length})</div><div class="scroll" style="max-height:300px;overflow-y:auto"><table class="narrow"><tr><th>utag</th>${SR.map(r => `<th>${esc(r.label)}</th>`).join("")}</tr>` +
       rows.map(([id, v]) => `<tr><td>${esc(id)}</td>${v.map(n => `<td>${fmt(n)}</td>`).join("")}</tr>`).join("") + "</table></div>" : "";
-  }
-  function low(cut) {                     // positives below the cutoff in every run: likely real dropouts
-    const ks = keys.filter(k => stateOf(k) === "pos" && SR.every(r => r.samples[k] === undefined || r.samples[k] < cut));
-    if (!ks.length) { $("nlow").innerHTML = ""; return; }
-    $("nlow").innerHTML = `<div class="note" style="margin:0 0 4px">${ks.length} positive well(s) below ${cut} reads in every run: more likely failed samples than demux misses.
-      <button id="nlowAll">exclude all</button></div><div class="scroll lowlist" style="max-height:220px;overflow-y:auto"><table><tr><th>sample</th>${SR.map(r => `<th>${esc(r.label)}</th>`).join("")}<th></th></tr>` +
-      ks.slice(0, 200).map(k => `<tr><td>${esc(k)}</td>${SR.map(r => `<td>${fmt(r.samples[k])}</td>`).join("")}<td><button data-x="${esc(k)}">exclude</button></td></tr>`).join("") + "</table></div>";
-    $("nlowAll").onclick = () => { ks.forEach(k => st[k] = "exc"); save(); paint(); analyse(); };
-    $("nlow").querySelectorAll("button[data-x]").forEach(b => b.onclick = () => { st[b.dataset.x] = "exc"; save(); paint(); analyse(); });
   }
   $("ndl").onclick = () => {
     const q = v => /[",\n]/.test(v) ? '"' + String(v).replace(/"/g, '""') + '"' : v;
