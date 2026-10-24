@@ -538,7 +538,8 @@ def tag_rows(a, layout):
     fwd = {r["utag-fwd"] for r in design} - {r["utag-fwd"] for r in layout}
     rev = {r["utag-rev"] for r in design} - {r["utag-rev"] for r in layout}
     pairs = {(r["utag-fwd"], r["utag-rev"]) for r in design} - used
-    a.decoys = dict(fwd=fwd, rev=rev, pairs=pairs)      # for run_summary.csv
+    a.decoys = dict(fwd=fwd, rev=rev, pairs=pairs,      # for run_summary.csv and decoys.tsv
+                    rows=[r for r in design if (r["utag-fwd"], r["utag-rev"]) in pairs])
     print_info(f"decoys from {os.path.basename(a.plates)}: {len(fwd)} fwd + {len(rev)} rev tags not in the sample sheet; "
                f"{len(pairs)} tag pairs can be reported as unexpected")
     return layout + design
@@ -1019,7 +1020,8 @@ def cmd_demux(a):
              ("unexpected_or_unparsed_files", len(unexpected))]
     unexp_tsv = os.path.join(out, "unexpected.tsv")
     n_unexp = n_decoy = 0
-    dec = getattr(a, "decoys", None) or dict(fwd=set(), rev=set(), pairs=set())
+    n_pair = Counter()
+    dec = getattr(a, "decoys", None) or dict(fwd=set(), rev=set(), pairs=set(), rows=[])
     with open(unexp_tsv, "w") as fh:          # tag pairs found on reads but not in the sample list
         fh.write("file\tutag_fwd\tutag_rev\treads\n")
         for f in unexpected:
@@ -1031,9 +1033,21 @@ def cmd_demux(a):
             pair = pair or ("", "")
             n = count_fastq_reads(f)
             n_unexp += n
+            n_pair[pair] += n
             if (pair[0] in dec["fwd"] or pair[1] in dec["rev"]) if single else pair in dec["pairs"]:
                 n_decoy += n                  # a plate-map well that is not in the sample sheet
             fh.write(f"barbell/trimmed/{os.path.basename(f)}\t{pair[0]}\t{pair[1]}\t{n}\n")
+    decoy_tsv = None
+    if dec["rows"]:                           # reads per decoy well (0 too): negative controls in run_summary.html
+        decoy_tsv = os.path.join(out, "decoys.tsv")
+        with open(decoy_tsv, "w") as fh:
+            fh.write("sample\tplate\twell\tutag_fwd\tutag_rev\treads\n")
+            for r in dec["rows"]:
+                f, v = r["utag-fwd"], r["utag-rev"]
+                n = n_pair[(f, "")] + n_pair[("", v)] if single else n_pair[(f, v)]
+                fh.write(f"{r['plate-well']}\t{r['plate']}\t{r['well']}\t{f}\t{v}\t{n}\n")
+    elif os.path.exists(os.path.join(out, "decoys.tsv")):
+        os.remove(os.path.join(out, "decoys.tsv"))     # from an earlier run with decoys: would not match this one
     stats += [("decoy_tags_fwd", len(dec["fwd"])), ("decoy_tags_rev", len(dec["rev"])), ("decoy_wells", len(dec["pairs"])),
               ("unexpected_reads", n_unexp),
               ("unexpected_reads_decoy_wells", n_decoy),
@@ -1050,7 +1064,8 @@ def cmd_demux(a):
     print()
     report = write_run_report(out)
     print_kv([("samples", f"{rel(os.path.join(out, 'samples'))}/<sample>{ext}"),
-              ("summary", rel(summary)), ("unexpected", rel(unexp_tsv)), ("run summary", rel(run_csv)), ("patterns", rel(os.path.join(bb, 'inspect.txt'))),
+              ("summary", rel(summary)), ("unexpected", rel(unexp_tsv))] +
+             ([("decoys", rel(decoy_tsv))] if decoy_tsv else []) + [("run summary", rel(run_csv)), ("patterns", rel(os.path.join(bb, 'inspect.txt'))),
               ("barbell files", rel(bb))] + ([("report", rel(report))] if report else []))
     print()
     print_note("check barbell/inspect.txt - the two top patterns should be the two filter patterns.")
@@ -1067,7 +1082,7 @@ def write_run_report(out):
     sys.stdout.flush()
     r = cr.parse_log(log)
     r["label"] = os.path.basename(os.path.normpath(out))
-    r["samples"], r["meta"] = cr.read_samples(log, r["subcommand"])
+    r["samples"], r["meta"], r["decoys"] = cr.read_samples(log, r["subcommand"])
     path = os.path.join(out, "run_summary.html")
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(cr.render_html([r], r["label"], f"utag run summary: {r['label']}", 8))
@@ -1292,7 +1307,7 @@ def cmd_twopass(a):
             skipped.append(b)
     if skipped:
         print_note(f"no samples listed for bin(s) {', '.join(skipped)}: skipped in pass 2")
-    stats, per_sample, per_unexp = [], [], []
+    stats, per_sample, per_unexp, per_decoy = [], [], [], []
     unexp_tot = Counter()
     for b, fs in bins.items():
         if not bin_rows[b]:
@@ -1343,6 +1358,11 @@ def cmd_twopass(a):
                 for ln in fh:
                     f, *rest = ln.rstrip("\n").split("\t")
                     per_unexp.append([b, os.path.relpath(os.path.join(bdir, f), out)] + rest)
+        dx = os.path.join(bdir, "decoys.tsv")
+        if os.path.exists(dx):
+            with open(dx) as fh:
+                next(fh)
+                per_decoy += [[b] + ln.rstrip("\n").split("\t") for ln in fh]
         st = stats[-1]
         print_info(f"{fmt_int(st[1])} reads in bin, {style(fmt_int(st[3]), 'bold', pct_color(100 * st[3] / max(1, st[1])))} assigned "
                    + style(f"({100 * st[3] / max(1, st[1]):.1f}%)", "gray"))
@@ -1354,6 +1374,12 @@ def cmd_twopass(a):
     with open(os.path.join(out, "unexpected.tsv"), "w") as fh:
         fh.write("ont_barcode\tfile\tutag_fwd\tutag_rev\treads\n")
         fh.writelines("\t".join(x) + "\n" for x in per_unexp)
+    if per_decoy:
+        with open(os.path.join(out, "decoys.tsv"), "w") as fh:
+            fh.write("ont_barcode\tsample\tplate\twell\tutag_fwd\tutag_rev\treads\n")
+            fh.writelines("\t".join(x) + "\n" for x in per_decoy)
+    elif os.path.exists(os.path.join(out, "decoys.tsv")):
+        os.remove(os.path.join(out, "decoys.tsv"))
     with open(os.path.join(out, "summary.tsv"), "w") as fh:
         fh.write("ont_barcode\tsample\tplate\twell\tutag_fwd\tutag_rev\treads\n")
         fh.write("\n".join("\t".join(x) for x in per_sample) + "\n")
@@ -1384,7 +1410,8 @@ def cmd_twopass(a):
     print()
     report = write_run_report(out)
     print_kv([("samples", f"{rel(os.path.join(out, 'samples'))}/<ONT bin>/<sample>.fastq"),
-              ("tables", f"{rel(os.path.join(out, 'ont_bins.tsv'))}, summary.tsv, unexpected.tsv, run_summary.csv"),
+              ("tables", f"{rel(os.path.join(out, 'ont_bins.tsv'))}, summary.tsv, unexpected.tsv, "
+                         f"{'decoys.tsv, ' if per_decoy else ''}run_summary.csv"),
               ("barbell files", rel(bb))] + ([("report", rel(report))] if report else []))
 
 

@@ -13,7 +13,8 @@ Read from each log: start time, command, context/kit, barbell step times, warnin
 two-pass summary, the read-pattern breakdown ("found"), the top patterns and, for twopass, the per-ONT-bin table.
 twopass logs have no pattern tables: when the per-bin logs are still on disk, their patterns are summed.
 When a summary.tsv sits next to a log, the reads per sample are compared too (twopass samples as <bin>/<sample>,
-or by sample name with --ignore-bins).
+or by sample name with --ignore-bins). The decoy wells in decoys.tsv (plate-map wells not in the sample sheet) are
+added to the negative-control plates, marked negative to start with.
 
 demux and twopass name two metrics differently; both are reported under the twopass names:
     reads_assigned_to_wells -> reads_assigned_to_samples, wells_with_reads -> samples_with_reads,
@@ -180,10 +181,21 @@ def parse_log(path):
 
 
 def read_samples(log, subcommand, ignore_bins=False):
-    """({sample: reads}, {sample: [plate, well, utag_fwd, utag_rev]}) from the summary.tsv next to the log"""
+    """({sample: reads}, {sample: [plate, well, utag_fwd, utag_rev]}, {decoy well: reads}) from the summary.tsv
+    and decoys.tsv next to the log. Decoy wells are the plate-map wells not in the sample sheet; a name that is
+    also a sample gets a ~decoy suffix."""
     p = os.path.join(os.path.dirname(log), "summary.tsv")
     if not os.path.exists(p):
-        return None, {}
+        return None, {}, {}
+    out, meta = read_counts(p, subcommand, ignore_bins)
+    d = os.path.join(os.path.dirname(log), "decoys.tsv")
+    decoys, dmeta = read_counts(d, subcommand, ignore_bins) if os.path.exists(d) else ({}, {})
+    for k in [k for k in decoys if k in out]:
+        decoys[k + "~decoy"], dmeta[k + "~decoy"] = decoys.pop(k), dmeta.pop(k)
+    return out, {**dmeta, **meta}, decoys
+
+
+def read_counts(p, subcommand, ignore_bins):
     out, meta = {}, {}
     with open(p, newline="") as fh:
         for row in csv.DictReader(fh, delimiter="\t"):
@@ -215,6 +227,7 @@ def harmonize_bins(runs):
         ren = lambda k: first.get(num(k.split("/", 1)[0]), k.split("/", 1)[0]) + "/" + k.split("/", 1)[1] if "/" in k else k
         r["samples"] = {ren(k): v for k, v in r["samples"].items()}
         r["meta"] = {ren(k): [ren(m[0])] + m[1:] if m and "/" in m[0] else m for k, m in r["meta"].items()}
+        r["decoys"] = {ren(k): v for k, v in r["decoys"].items()}
 
 
 def find_logs(args):
@@ -353,7 +366,7 @@ def main():
     for p, l in zip(logs, labels):
         r = parse_log(p)
         r["label"] = l
-        r["samples"], r["meta"] = (None, {}) if a.no_samples else read_samples(p, r["subcommand"], a.ignore_bins)
+        r["samples"], r["meta"], r["decoys"] = (None, {}, {}) if a.no_samples else read_samples(p, r["subcommand"], a.ignore_bins)
         runs.append(r)
     if len(runs) > 1:
         harmonize_bins(runs)
@@ -401,7 +414,7 @@ def render_html(runs, base, title, top, theme="light"):
         "foundLabels": FOUND_LABEL, "patterns": top_patterns(runs + [b for r in runs for b in r["pass2"]], top),
         "runs": [{**{k: r[k] for k in ("label", "log", "started", "cwd", "command", "subcommand", "context", "kit",
                                        "status", "steps", "warnings", "errors", "summary", "found", "patterns",
-                                       "unique_patterns", "bins", "info", "samples", "pass1", "pattern_reads")},
+                                       "unique_patterns", "bins", "info", "samples", "decoys", "pass1", "pattern_reads")},
                   "barbell_seconds": round(r["barbell_seconds"], 1),
                   "pass2": [{**{k: b[k] for k in ("label", "status", "steps", "warnings", "errors", "summary", "found",
                                                   "patterns", "unique_patterns", "info")},
@@ -448,6 +461,8 @@ th,td{padding:4px 8px;border-bottom:1px solid var(--grid);text-align:right;white
 th{color:var(--dim);font-weight:600;position:sticky;top:0;background:var(--panel)}
 th:first-child,td:first-child{text-align:left}
 td.pat{font-family:ui-monospace,Menlo,monospace;font-size:11.5px;text-align:left}th.pat{text-align:left}
+#stab tr[data-k]{cursor:pointer}#stab tr[data-k]:hover td{background:var(--panel2)}#stab tr.sel td{color:var(--bad);font-weight:650}
+tr.key td{background:var(--hbg);font-weight:650}
 tr.sec td{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.05em;padding-top:12px;border-bottom:none}
 .d{font-size:11px;margin-left:6px}.up{color:var(--good)}.down{color:var(--bad)}.neu{color:var(--muted)}
 th.sortable{cursor:pointer}th.sortable:hover{color:var(--ink)}
@@ -520,13 +535,14 @@ table.narrow{width:auto}.narrow th:first-child,.narrow td:first-child{min-width:
         <button data-m="neg" class="on"><i style="background:var(--bad)"></i>negative</button>
         <button data-m="exc"><i style="background:var(--muted)"></i>exclude</button>
         <button data-m="pos"><i style="background:var(--s1)"></i>positive</button></span>
-      <input id="nsel" placeholder="Plate4, *-H12, NB02/Plate4-* …" style="width:220px"><button id="nselGo">mark</button>
+      <button id="ndec" class="hidden" title="mark all decoy wells (plate-map wells not in the sample sheet) with the active mode">decoys</button>
       <button id="nclear">reset all to positive</button>
       <label>call a well with ≥ <input id="ncut" type="number" min="1" value="10" style="width:64px"> reads</label>
       <button id="ndl" style="margin-left:auto">download results CSV</button>
     </div>
     <div class="note" style="margin-top:0">Click or drag over wells, or click a plate name, row or column, to mark them with the active mode (click again to undo).
-      Negative = should have no reads (empty wells, an unused plate, NTCs). Excluded wells count nowhere (not loaded, known dropouts). All other wells are positives.</div>
+      Negative = should have no reads (empty wells, an unused plate, NTCs). Excluded wells count nowhere (not loaded, known dropouts). All other wells are positives.
+      Decoy wells (plate-map wells not in the sample sheet) start as negatives; the decoys button marks them all with the active mode.</div>
     <div class="plates" id="nplates"></div>
     <div id="nres"></div>
   </section>
@@ -539,7 +555,7 @@ const R = D.runs, $ = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const fmt = v => v === undefined || v === null || v === "" ? "–" : (typeof v === "number" ? (Number.isInteger(v) ? v.toLocaleString("en-US") : v.toLocaleString("en-US", {maximumFractionDigits: 1})) : v);
 const pc = (a, b) => (b ? 100 * a / b : null);
-const pf = v => v === null || v === undefined ? "–" : v.toFixed(1) + "%";
+const pf = v => v === null || v === undefined ? "–" : v.toFixed(v > 0 && v < .1 ? 2 : 1) + "%";   // 0.05%, not 0.1%
 const tip = $("tip");
 function showTip(e, h) { tip.innerHTML = h; tip.style.display = "block"; const w = tip.offsetWidth, hh = tip.offsetHeight;
   let x = e.clientX + 14, y = e.clientY + 14; if (x + w > innerWidth - 8) x = e.clientX - w - 14; if (y + hh > innerHeight - 8) y = e.clientY - hh - 14;
@@ -557,7 +573,7 @@ const P2 = SINGLE && R[0].pass2 ? R[0].pass2 : [], minBin = Math.max(10, 0.001 *
 const P2small = P2.filter(b => (b.summary.total_reads || 0) < minBin);
 const C = P2.length ? [{...R[0], label: "all bins"}, ...P2.filter(b => !P2small.includes(b))] : R;
 if (P2small.length && R[0].samples)          // their samples (all wells of the plate map, ~0 reads) would swamp the sample views
-  for (const k of Object.keys(R[0].samples)) if (P2small.some(b => k.startsWith(b.label + "/"))) delete R[0].samples[k];
+  for (const o of [R[0].samples, R[0].decoys || {}]) for (const k of Object.keys(o)) if (P2small.some(b => k.startsWith(b.label + "/"))) delete o[k];
 
 const fk = Object.keys(D.foundLabels);
 
@@ -593,7 +609,7 @@ function drawMetrics() {
   for (const k of keys) {
     const vals = C.map(r => r.summary[k]), defined = vals.filter(v => v !== undefined && v !== null);
     if (diffOnly && defined.every(v => v === defined[0])) continue;
-    h += `<tr><td>${esc(k)}</td>` + C.map(r => { const v = r.summary[k], t = r.summary.total_reads;
+    h += `<tr${k === "reads_assigned_to_samples" ? ' class="key"' : ""}><td>${esc(k)}</td>` + C.map(r => { const v = r.summary[k], t = r.summary.total_reads;
       return `<td class="${showPct ? "" : "gap"}">${v === undefined ? "–" : fmt(v)}</td>` +
         (showPct ? `<td class="of gap">${v !== undefined && ofTotal(k) && t ? `<span class="cell" style="${shade(v / t)}">${pf(100 * v / t)}</span>` : ""}</td>` : ""); }).join("") + "</tr>";
   }
@@ -652,18 +668,19 @@ const binRows = new Map();
 R.forEach(r => Object.keys(r.bins).forEach(b => { const k = binKey(b); if (!binRows.has(k)) binRows.set(k, new Set()); binRows.get(k).add(b); }));
 const bins = [...binRows.keys()].sort((a, b) => a.localeCompare(b, undefined, {numeric: true}));
 const binOfRun = (r, k) => { const n = Object.keys(r.bins).find(b => binKey(b) === k); return n ? r.bins[n] : undefined; };
-function drawBins() {                     // one row per bin; reads, hits, assigned, assigned %, samples (per run)
+function drawBins() {                     // one row per bin; reads and assigned also as % of the run's total reads
   const br = R.filter(r => Object.keys(r.bins).length), multi = br.length > 1;
   const p1only = br.every(r => Object.values(r.bins).every(x => x.assigned === undefined));   // twopass --pass1-only
-  const cols = p1only ? ["reads in bin", "of total reads"] : ["reads in bin", "with hit", "assigned", "assigned %", "samples with reads"];
+  const cols = p1only ? ["reads in bin", "of total reads"] : ["reads in bin", "of total reads", "with hit", "assigned", "assigned, of total reads", "samples with reads"];
   let h = multi ? `<tr><th></th>${br.map(r => `<th colspan="${cols.length}" style="text-align:center;border-bottom:1px solid var(--axis)">${esc(r.label)}</th>`).join("")}</tr>` : "";
   h += `<tr><th>ONT bin</th>${br.map(() => cols.map(c => `<th>${c}</th>`).join("")).join("")}</tr>`;
   for (const b of bins) { h += `<tr><td>${esc([...binRows.get(b)].join(" · "))}</td>` + br.map(r => { const x = binOfRun(r, b);
       if (!x) return cols.map(() => `<td class="neu">–</td>`).join("");
-      if (p1only) { const t = r.summary.total_reads, f = t ? x.reads / t : null;
-        return `<td>${fmt(x.reads)}</td><td>${f === null ? "–" : `<span class="cell" style="${shade(f)}">${pf(100 * f)}</span>`}</td>`; }
-      const f = x.reads && x.assigned !== undefined ? x.assigned / x.reads : null, sf = x.samples_expected ? x.samples_with_reads / x.samples_expected : null;
-      return `<td>${fmt(x.reads)}</td><td>${fmt(x.with_hit)}</td><td>${fmt(x.assigned)}</td>` +
+      const t = r.summary.total_reads, tf = t ? x.reads / t : null;
+      const inBin = `<td>${fmt(x.reads)}</td><td>${tf === null ? "–" : `<span class="cell" style="${shade(tf)}">${pf(100 * tf)}</span>`}</td>`;
+      if (p1only) return inBin;
+      const f = t && x.assigned !== undefined ? x.assigned / t : null, sf = x.samples_expected ? x.samples_with_reads / x.samples_expected : null;
+      return inBin + `<td>${fmt(x.with_hit)}</td><td>${fmt(x.assigned)}</td>` +
         `<td>${f === null ? "–" : `<span class="cell" style="${shade(f)}">${pf(100 * f)}</span>`}</td>` +
         `<td>${x.samples_with_reads === undefined ? "–" : `<span class="cell" style="${sf === null ? "" : shade(sf)}">${fmt(x.samples_with_reads)} / ${fmt(x.samples_expected)}</span>`}</td>`; }).join("") + "</tr>"; }
   $("bins").innerHTML = h;
@@ -684,6 +701,16 @@ if (SR.length === 1) {                      // one run: samples ranked by reads,
     $("sbin").onchange = () => { setBin($("sbin").value); drawRank(); };
   }
   setBin("");
+  // selected samples (click a table row or a bar): red bars, clear with the button in the panel header
+  const sel = new Set();
+  $("smpPanel").querySelector("h2 .ctl").insertAdjacentHTML("afterbegin", `<span id="ssel" class="hidden"></span><button id="sclr" class="hidden">clear selection</button>`);
+  const allTot = ALL.reduce((a, p) => a + p.v, 0);
+  const selShow = () => { const n = ALL.filter(p => sel.has(p.k)).reduce((a, p) => a + p.v, 0);
+    $("ssel").classList.toggle("hidden", !sel.size); $("sclr").classList.toggle("hidden", !sel.size);
+    $("ssel").textContent = `${fmt(sel.size)} selected · ${fmt(n)} reads (${pf(pc(n, allTot))} of assigned)`;
+    $("sclr").textContent = `clear selection (${sel.size})`; drawSorted(); };
+  const toggle = k => { sel.has(k) ? sel.delete(k) : sel.add(k); selShow(); };
+  $("sclr").onclick = () => { sel.clear(); selShow(); };
   // sort shared by the table (click a header) and the plot: reads, sample name, or plate and well (row-major)
   const srt = {key: "reads", dir: -1}, WRE = /^([A-Pa-p])0?(\d{1,2})$/;
   const wellKey = p => { const mm = D.meta[p.k] || [], w = WRE.exec(mm[1] || "");
@@ -701,7 +728,7 @@ if (SR.length === 1) {                      // one run: samples ranked by reads,
     med = q(v, .5);
     const mean = tot / Math.max(1, n), sd = Math.sqrt(v.reduce((a, x) => a + (x - mean) ** 2, 0) / Math.max(1, n)), with0 = v.filter(x => !x).length;
     const within2 = med ? v.filter(x => x >= med / 2 && x <= med * 2).length : 0, p10 = q(v, .1), p90 = q(v, .9);
-    $("sstat").innerHTML = `${fmt(n)} samples · ${fmt(n - with0)} with reads${with0 ? ` · <span style="color:var(--bad)">${fmt(with0)} with 0</span>` : ""} · ` +
+    $("sstat").innerHTML = `${fmt(n)} samples · ${fmt(n - with0)} with reads${with0 ? ` · <span style="color:var(--s4)">${fmt(with0)} with 0</span>` : ""} · ` +
       `median ${fmt(Math.round(med))} · mean ${fmt(Math.round(mean))} · min ${fmt(v[n - 1] ?? 0)} · max ${fmt(v[0] ?? 0)} · CV ${mean ? (sd / mean).toFixed(2) : "–"} · ` +
       `90th / 10th percentile ${p10 ? (p90 / p10).toFixed(1) + "×" : "–"} · within 2× of the median ${pf(pc(within2, n))}`;
     drawSorted();
@@ -718,28 +745,31 @@ if (SR.length === 1) {                      // one run: samples ranked by reads,
       if (y < m.t || y > m.t + ph) continue;
       svg += `<line x1="${m.l}" x2="${W - m.r}" y1="${y}" y2="${y}" stroke="var(--axis)" stroke-dasharray="${lab === "median" ? "" : "4 4"}"/><text x="${W - m.r - 4}" y="${y - 4}" text-anchor="end">${lab}</text>`; }
     const order = srt.key === "reads" ? (srt.dir < 0 ? "most reads first" : "fewest reads first") : srt.key === "name" ? "by name" : "by plate and well";
-    svg += `<text x="${m.l + pw / 2}" y="${H - 6}" text-anchor="middle" style="fill:var(--ink)">samples, ${order} (${fmt(n)})</text>`;
+    const sum = rows.reduce((a, p) => a + p.v, 0), part = n < all.length;     // filtered: shown of all, in the ONT bin
+    svg += `<text x="${m.l + pw / 2}" y="${H - 6}" text-anchor="middle" style="fill:var(--ink)">samples, ${order} (${fmt(n)}${part ? " of " + fmt(all.length) : ""}) · ` +
+      `${fmt(sum)}${part ? " of " + fmt(tot) : ""} reads${part ? ` (${pf(pc(sum, tot))})` : ""}</text>`;
     svg += `<text transform="translate(14 ${m.t + ph / 2}) rotate(-90)" text-anchor="middle" style="fill:var(--ink)">reads</text>`;
     const bw = Math.max(1, pw / Math.max(1, n) - (n > 150 ? 0 : 1));
     rows.forEach((p, i) => { const y = sy(p.v);
-      svg += `<rect x="${(sx(i) - bw / 2).toFixed(1)}" y="${y.toFixed(1)}" width="${bw.toFixed(2)}" height="${Math.max(0, m.t + ph - y).toFixed(1)}" fill="${p.v ? "var(--s1)" : "var(--bad)"}" data-k="${esc(p.k)}"/>`;
-      if (!p.v) svg += `<rect x="${(sx(i) - bw / 2).toFixed(1)}" y="${m.t + ph - 3}" width="${bw.toFixed(2)}" height="3" fill="var(--bad)"/>`; });
+      svg += `<rect x="${(sx(i) - bw / 2).toFixed(1)}" y="${y.toFixed(1)}" width="${bw.toFixed(2)}" height="${Math.max(0, m.t + ph - y).toFixed(1)}" fill="${sel.has(p.k) ? "var(--bad)" : "var(--s1)"}" data-k="${esc(p.k)}" style="cursor:pointer"/>`;
+      if (!p.v) svg += `<rect x="${(sx(i) - bw / 2).toFixed(1)}" y="${m.t + ph - 3}" width="${bw.toFixed(2)}" height="3" fill="var(${sel.has(p.k) ? "--bad" : "--s4"})"/>`; });   // 0 reads: yellow
     $("scatter").innerHTML = svg + "</svg>";
     $("scatter").querySelectorAll("rect[data-k]").forEach(el => { const p = all.find(x => x.k === el.dataset.k), mm = D.meta[p.k] || [];
       el.addEventListener("mousemove", e => showTip(e, `<b>${esc(p.k)}</b><br>${fmt(p.v)} reads · ${pf(pc(p.v, tot))} of assigned` +
         (med ? ` · ${(p.v / med).toFixed(2)}× median` : "") + (mm[1] ? `<br><span class="t">${esc(mm[0])} ${esc(mm[1])} · utags ${esc(mm[2])} / ${esc(mm[3])}</span>` : "")));
-      el.addEventListener("mouseleave", hideTip); });
+      el.addEventListener("mouseleave", hideTip); el.addEventListener("click", () => toggle(p.k)); });
   }
   function drawRankTable(rows) {
     const shown = rows.slice(0, 500), arrow = k => srt.key === k ? (srt.dir < 0 ? " ▼" : " ▲") : "";
     const th = (k, lab) => `<th class="sortable" data-s="${k}">${lab}${arrow(k)}</th>`;
     $("stab").innerHTML = `<tr>${th("name", "sample")}${th("well", "plate · well")}${th("reads", "reads")}${th("reads", "% of assigned")}${th("reads", "× median")}</tr>` +
       shown.map(p => { const mm = D.meta[p.k] || [], r = med ? p.v / med : null;
-        return `<tr><td>${esc(p.k)}</td><td>${esc([mm[0], mm[1]].filter(Boolean).join(" · "))}</td><td>${fmt(p.v)}</td><td>${pf(pc(p.v, tot))}</td>` +
+        return `<tr data-k="${esc(p.k)}"${sel.has(p.k) ? ' class="sel"' : ""}><td>${esc(p.k)}</td><td>${esc([mm[0], mm[1]].filter(Boolean).join(" · "))}</td><td>${fmt(p.v)}</td><td>${pf(pc(p.v, tot))}</td>` +
           `<td class="${r === null ? "neu" : r < .5 || r > 2 ? "down" : ""}">${r === null ? "–" : r.toFixed(2)}</td></tr>`; }).join("") +
       (rows.length > 500 ? `<tr><td colspan="5" class="neu">${fmt(rows.length - 500)} more – use the filter</td></tr>` : "");
   }
-  $("stab").addEventListener("click", e => { const h = e.target.closest("th[data-s]"); if (!h) return; const k = h.dataset.s;
+  $("stab").addEventListener("click", e => { const tr = e.target.closest("tr[data-k]"); if (tr) return toggle(tr.dataset.k);
+    const h = e.target.closest("th[data-s]"); if (!h) return; const k = h.dataset.s;
     srt.dir = srt.key === k ? -srt.dir : k === "reads" ? -1 : 1; srt.key = k; drawSorted(); });
   $("sortBy").classList.add("multi");
   $("scale").onchange = drawSorted;
@@ -802,13 +832,16 @@ if (SR.length === 1) {                      // one run: samples ranked by reads,
 // ---- negative controls: wells marked in the page, analysed per run (selection kept in this browser only)
 if (SR.length) (() => {
   $("negPanel").classList.remove("hidden");
-  const M = D.meta, KEYS = [...new Set(SR.flatMap(r => Object.keys(r.samples)))];
+  // decoy wells (plate-map wells not in the sample sheet, from decoys.tsv) start as negatives
+  SR.forEach(r => r.nv = {...(r.decoys || {}), ...r.samples});
+  const M = D.meta, DEC = new Set(SR.flatMap(r => Object.keys(r.decoys || {})));
+  const KEYS = [...new Set(SR.flatMap(r => Object.keys(r.nv)))];
   let keys = KEYS;                          // the wells analysed: all, or one ONT bin of a twopass run
   const SKEY = "compare-runs:neg:" + document.title + ":" + KEYS.length;
   let st = {}; try { st = JSON.parse(localStorage.getItem(SKEY) || "{}") || {}; } catch (e) {}
   const save = () => { try { localStorage.setItem(SKEY, JSON.stringify(st)); } catch (e) {} };
   let mode = "neg";
-  const stateOf = k => st[k] || "pos";
+  const def = k => DEC.has(k) ? "neg" : "pos", stateOf = k => st[k] || def(k);
   // plates from the summary.tsv plate/well columns; samples without a well go into an "other" panel
   const WRE = /^([A-Pa-p])0?(\d{1,2})$/, panels = new Map();
   function buildPanels() { panels.clear();
@@ -851,8 +884,8 @@ if (SR.length) (() => {
     $("nplates").innerHTML = h + (grp !== null ? "</div></div>" : ""); paint();
   }
   function paint() {
-    const run = SR[+$("ncol").value], mx = Math.max(1, ...Object.values(run.samples));
-    $("nplates").querySelectorAll(".w[data-k]").forEach(el => { const k = el.dataset.k, v = run.samples[k], s = stateOf(k);
+    const run = SR[+$("ncol").value], mx = Math.max(1, ...Object.values(run.nv));
+    $("nplates").querySelectorAll(".w[data-k]").forEach(el => { const k = el.dataset.k, v = run.nv[k], s = stateOf(k);
       el.style.background = v > 0 ? ramp(Math.log10(v + 1) / Math.log10(mx + 1)) : "";
       el.classList.toggle("neg", s === "neg"); el.classList.toggle("exc", s === "exc"); });
     $("nplates").querySelectorAll(".pl").forEach(pl => { const ks = [...pl.querySelectorAll(".w[data-k]")].map(e => e.dataset.k);
@@ -861,7 +894,7 @@ if (SR.length) (() => {
   }
   function apply(ks, toggle) {             // all already in the active mode + toggle -> back to positive
     const m = toggle && ks.length && ks.every(k => stateOf(k) === mode) ? "pos" : mode;
-    for (const k of ks) { if (m === "pos") delete st[k]; else st[k] = m; }
+    for (const k of ks) { if (m === def(k)) delete st[k]; else st[k] = m; }
     save(); paint(); analyse();
   }
   // mouse: click a well, drag a box inside one plate, or click a plate name / row / column header
@@ -872,9 +905,9 @@ if (SR.length) (() => {
     drag = {pl: w.closest(".pl"), a: {r: +w.dataset.r, c: +w.dataset.c}, b: {r: +w.dataset.r, c: +w.dataset.c}, el: w}; });
   $("nplates").addEventListener("mouseover", e => { const w = e.target.closest(".w[data-k]");
     if (w) { const k = w.dataset.k, m = M[k] || [];
-      showTip(e, `<b>${esc(k)}</b> <span class="t">${esc(stateOf(k) === "pos" ? "positive" : stateOf(k) === "neg" ? "negative" : "excluded")}</span>` +
+      showTip(e, `<b>${esc(k)}</b> <span class="t">${esc(stateOf(k) === "pos" ? "positive" : stateOf(k) === "neg" ? "negative" : "excluded")}${DEC.has(k) ? " · decoy, not in the sample sheet" : ""}</span>` +
         (m[2] || m[3] ? `<br><span class="t">utags</span> ${esc(m[2])} / ${esc(m[3])}` : "") +
-        SR.map(r => `<br><span class="t">${esc(r.label)}</span> ${fmt(r.samples[k])}`).join("")); } else hideTip();
+        SR.map(r => `<br><span class="t">${esc(r.label)}</span> ${fmt(r.nv[k])}`).join("")); } else hideTip();
     if (!drag || !w || w.closest(".pl") !== drag.pl || w.dataset.r === undefined) return;
     drag.b = {r: +w.dataset.r, c: +w.dataset.c};
     drag.pl.querySelectorAll(".w.pre").forEach(x => x.classList.remove("pre")); box(drag.pl, drag.a, drag.b).forEach(x => x.classList.add("pre")); });
@@ -888,12 +921,9 @@ if (SR.length) (() => {
     apply(ws.map(x => x.dataset.k), true); });
   $("nmodes").addEventListener("click", e => { const b = e.target.closest("button"); if (!b) return; mode = b.dataset.m;
     $("nmodes").querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b)); });
-  // selectors: sample names or plate names, * and ? wildcards, case-insensitive
-  const glob = g => new RegExp("^" + g.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".") + "$", "i");
-  $("nselGo").onclick = () => { const res = $("nsel").value.split(/[\s,;]+/).filter(Boolean).map(glob);
-    const ks = keys.filter(k => res.some(re => re.test(k) || re.test((M[k] || [])[0] || ""))); apply(ks, false); };
-  $("nsel").addEventListener("keydown", e => { if (e.key === "Enter") $("nselGo").onclick(); });
-  $("nclear").onclick = () => { st = {}; save(); paint(); analyse(); };
+  $("nclear").onclick = () => { st = Object.fromEntries([...DEC].map(k => [k, "pos"])); save(); paint(); analyse(); };
+  if (DEC.size) $("ndec").classList.remove("hidden");
+  $("ndec").onclick = () => apply(keys.filter(k => DEC.has(k)), false);
   $("ncol").onchange = paint;
   $("ncut").oninput = () => analyse();
 
@@ -908,10 +938,10 @@ if (SR.length) (() => {
   const callAt = (pos, neg, t) => { const tp = pos.filter(v => v >= t).length, fp = neg.filter(v => v >= t).length;
     return {t, tp, fn: pos.length - tp, fp, tn: neg.length - fp, sens: tp / pos.length, spec: 1 - fp / neg.length}; };
   function stats(run, cut) {
-    const ks = keys.filter(k => run.samples[k] !== undefined);
-    const pos = ks.filter(k => stateOf(k) === "pos").map(k => run.samples[k]), neg = ks.filter(k => stateOf(k) === "neg").map(k => run.samples[k]);
+    const ks = keys.filter(k => run.nv[k] !== undefined);
+    const pos = ks.filter(k => stateOf(k) === "pos").map(k => run.nv[k]), neg = ks.filter(k => stateOf(k) === "neg").map(k => run.nv[k]);
     if (!pos.length || !neg.length) return null;
-    const total = ks.reduce((a, k) => a + run.samples[k], 0), negReads = neg.reduce((a, b) => a + b, 0), maxNeg = Math.max(...neg);
+    const total = Object.values(run.samples).reduce((a, v) => a + v, 0), negReads = neg.reduce((a, b) => a + b, 0), maxNeg = Math.max(...neg);
     const cands = [...new Set([1, maxNeg + 1, ...pos, ...neg].filter(v => v >= 1))].sort((a, b) => a - b);
     let best = null; for (const t of cands) { const c = callAt(pos, neg, t); if (!best || c.sens + c.spec > best.sens + best.spec) best = c; }
     return {pos, neg, total, negReads, maxNeg, auc: auc(pos, neg), clean: callAt(pos, neg, maxNeg + 1), best, at: callAt(pos, neg, cut)};
@@ -933,7 +963,7 @@ if (SR.length) (() => {
     const cut = Math.max(1, +$("ncut").value || 1), S = SR.map(r => stats(r, cut)), ck = controlKind();
     const nN = keys.filter(k => stateOf(k) === "neg").length, nE = keys.filter(k => stateOf(k) === "exc").length;
     if (!nN) { $("nres").innerHTML = `<div class="note">Mark at least one negative well above to see sensitivity and specificity.</div>`; lastRows = []; return; }
-    const pp = v => v === null || v === undefined ? "–" : (100 * v).toFixed(1) + "%";
+    const pp = v => v === null || v === undefined ? "–" : pf(100 * v);
     const rows = [
       ["positive wells", s => fmt(s.pos.length)], ["negative wells", s => fmt(s.neg.length)],
       ["AUC (positive well > negative well)", s => s.auc.toFixed(4), true],
@@ -960,13 +990,13 @@ if (SR.length) (() => {
   }
   function strip(S, cut) {                // reads per well, one row per run, log scale
     const lw = Math.min(150, 12 + 7 * Math.max(...SR.map(r => r.label.length))), W = 620, rh = 44, H = SR.length * rh + 30, pw = W - lw - 16;
-    const mx = Math.max(10, ...SR.flatMap(r => Object.values(r.samples))), x = v => lw + pw * Math.log10(v + 1) / Math.log10(mx + 1);
+    const mx = Math.max(10, ...SR.flatMap(r => Object.values(r.nv))), x = v => lw + pw * Math.log10(v + 1) / Math.log10(mx + 1);
     let svg = `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="reads per well, positives and negatives">`;
     for (const t of [0, 1, 10, 100, 1e3, 1e4, 1e5].filter(t => t <= mx)) svg += `<line x1="${x(t)}" x2="${x(t)}" y1="0" y2="${H - 18}" stroke="var(--grid)"/><text x="${x(t)}" y="${H - 5}" text-anchor="middle">${fmt(t)}</text>`;
     let pts = [];
     SR.forEach((r, i) => { const y0 = i * rh + 6;
       svg += `<text x="${lw - 8}" y="${y0 + 18}" text-anchor="end" style="fill:var(--ink)">${esc(r.label.length > 20 ? "…" + r.label.slice(-19) : r.label)}</text>`;
-      keys.forEach((k, j) => { const s = stateOf(k), v = r.samples[k]; if (s === "exc" || v === undefined) return;
+      keys.forEach((k, j) => { const s = stateOf(k), v = r.nv[k]; if (s === "exc" || v === undefined) return;
         const jit = ((j * 2654435761) % 1000) / 1000, y = y0 + (s === "neg" ? 22 + jit * 10 : 2 + jit * 16);
         pts.push(`<circle cx="${x(v).toFixed(1)}" cy="${y.toFixed(1)}" r="${s === "neg" ? 3.5 : 2.5}" fill="var(${s === "neg" ? "--s2" : "--s1"})" fill-opacity="${s === "neg" ? .9 : .5}" data-h="${esc(`<b>${esc(k)}</b><br><span class="t">${esc(r.label)}</span> ${fmt(v)} reads · ${s === "neg" ? "negative" : "positive"}`)}"/>`); }); });
     svg += pts.join("") + `<line x1="${x(cut - .5)}" x2="${x(cut - .5)}" y1="0" y2="${H - 18}" stroke="var(--ink)" stroke-width="1.5" stroke-dasharray="3 3"/>`;
@@ -976,7 +1006,7 @@ if (SR.length) (() => {
   function tags() {                       // which utags collect the reads in negative wells
     const nk = keys.filter(k => stateOf(k) === "neg"), acc = new Map();
     for (const k of nk) { const m = M[k] || []; for (const [side, t] of [["fwd", m[2]], ["rev", m[3]]]) { if (!t) continue;
-      const id = side + " " + t; if (!acc.has(id)) acc.set(id, SR.map(() => 0)); SR.forEach((r, i) => acc.get(id)[i] += r.samples[k] || 0); } }
+      const id = side + " " + t; if (!acc.has(id)) acc.set(id, SR.map(() => 0)); SR.forEach((r, i) => acc.get(id)[i] += r.nv[k] || 0); } }
     const rows = [...acc.entries()].sort((a, b) => b[1].reduce((x, y) => x + y, 0) - a[1].reduce((x, y) => x + y, 0)).slice(0, 12);
     $("ntags").innerHTML = rows.length ? `<div class="note" style="margin:0 0 4px">reads in negative wells per utag (top ${rows.length})</div><div class="scroll" style="max-height:300px;overflow-y:auto"><table class="narrow"><tr><th>utag</th>${SR.map(r => `<th>${esc(r.label)}</th>`).join("")}</tr>` +
       rows.map(([id, v]) => `<tr><td>${esc(id)}</td>${v.map(n => `<td>${fmt(n)}</td>`).join("")}</tr>`).join("") + "</table></div>" : "";

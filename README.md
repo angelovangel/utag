@@ -200,6 +200,7 @@ demux_out/
   samples/<sample>.fastq[.gz]   the result: one file per sample, utag and primer trimmed off
   summary.tsv                   reads per sample with plate, well and tags (0-read samples too); input for plate-heatmap.py
   unexpected.tsv                tag pairs found on reads but not in the plate map / sample sheet, with read counts
+  decoys.tsv                    with --samplesheet: reads per decoy well (plate-map wells not in the sheet, 0-read wells too)
   run_summary.csv               totals (also printed): reads in, with a hit, assigned, tag at both / one end, decoys,
                                 unexpected (in decoy wells / other tag pairs)
   utag.log               everything the script printed, with date and command line
@@ -226,7 +227,8 @@ Once you have checked the results, `barbell/` can be deleted.
 ```
 twopass_out/
   samples/<ONT bin>/<sample>.fastq
-  summary.tsv, unexpected.tsv   as above, with an ont_barcode column
+  summary.tsv, unexpected.tsv,  as above, with an ont_barcode column
+  decoys.tsv
   ont_bins.tsv                  reads per ONT bin: in bin, with hit, assigned
   run_summary.csv, utag.log
   barbell/
@@ -298,4 +300,4 @@ two top patterns should be `Ftag ... Rtag(rc)` and `Rtag ... Ftag(rc)`) -> `filt
 | `data/fasta/` | Ready-made query FASTAs for the default primers |
 | `simulate-reads.py` | Fake reads with known truth: `python3 simulate-reads.py nbd 3000 sim.fastq` |
 | `plate-heatmap.py` | HTML heatmap of reads per well: `python3 plate-heatmap.py demux_out/summary.tsv -o plates.html` (samples are placed by the `plate`/`well` columns, so custom names need no extra file). Mark negative-control wells (e.g. an unused plate) and wells to exclude in the page to get sensitivity / specificity at a read cutoff, the cutoff for 100% specificity and the utags that collect reads in the negatives |
-| `compare-runs.py` | Compare runs from their `utag.log`: `python3 compare-runs.py run1 run2 -o compare_out` writes into the folder `compare_out/` (the default): `run_comparison.csv` (metrics x runs, differences to `--baseline`), `samples.csv` (reads per sample, from each `summary.tsv`) and `run_comparison.html` (charts, metrics table, top patterns, ONT bins, per-sample scatter, and negative controls: mark empty wells on the plate grids to get sensitivity / specificity per run) |
+| `compare-runs.py` | Compare runs from their `utag.log`: `python3 compare-runs.py run1 run2 -o compare_out` writes into the folder `compare_out/` (the default): `run_comparison.csv` (metrics x runs, differences to `--baseline`), `samples.csv` (reads per sample, from each `summary.tsv`) and `run_comparison.html` (charts, metrics table, top patterns, ONT bins, per-sample scatter, and negative controls: mark empty wells on the plate grids to get sensitivity / specificity per run; decoy wells from `decoys.tsv` start marked negative, the `decoys` button marks them all with the active mode) |
