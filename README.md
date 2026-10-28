@@ -120,10 +120,11 @@ The AB barcode is attached by TOPO (`CCCTT` is the vaccinia TOPO site). Pass 1 u
 prefix (`bare`). `utag twopass -k SQK-MAB*` switches on `--single-end` in pass2 by itself. For untrimmed reads, `demux -c mab` puts `GCCCTT`
 before the utag.
 
-* **Plate map** `data/mab-udi-platemap.csv` (`plate,well,ont-barcode,utag-fwd,utag-rev`): 3 plates; rows A-H = AB01-AB08 on
-  plate 1, AB09-AB16 on plate 2, AB17-AB24 on plate 3; column 1-12 = UDI 1-12 = utag-fwd `U001`-`U012` + utag-rev
+* **Plate map** `data/mab-udi-platemap.csv` (`plate,well,ont-barcode,utag-fwd,utag-rev`): 3 plates, filled column-wise
+  (A1, B1 ... H1, A2 ...); each run of 12 wells is one AB barcode (A1-D2 = AB01, E2-H3 = AB02 ... E11-H12 = AB08 on plate 1,
+  AB09-AB16 on plate 2, AB17-AB24 on plate 3) carrying UDI 1-12 = utag-fwd `U001`-`U012` + utag-rev
   `U017 U018 U021 U023 U025 U028 U030 U033 U034 U040 U042 U043` from `data/utags-10bp-sequence.csv`. So plate 2 well C5 = AB11 +
-  U005/U025. The 24 tags are >= 4 edits apart, fwd and rev together (both can be at the read start). Edit the rev column to
+  U011/U042. The 24 tags are >= 4 edits apart, fwd and rev together (both can be at the read start). Edit the rev column to
   match your oligos.
 * **Few reads in AB bins?** MAB read starts are noisy, and pass 1 (`barbell kit`) allows only 3 errors in its 44 nt
   flank + AB barcode by default. On real reads `--kit-flank-max-errors 4` raised the binned reads from 52-84% to 70-91% per AB
