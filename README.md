@@ -162,8 +162,7 @@ the wells you did not list are searched as decoys, so reads from those wells end
 your samples. For samples given by their tags, `summary.tsv` also looks up their plate and well in the plate map.
 
 **Tags** (`--tags`): 44 tags of 10 nt (`U001`-`U044`), 5'->3' as in the oligo. Only tags used by the plate map / sample sheet go into
-the queries (`--all-tags` uses all). Every tag ID you reference must exist here. Check your setup with `tagqc`: tag edit distances, the plate map's layout per plate (which tags run along rows / columns),
-duplicate wells, missing tag sequences, and with `--samplesheet` the samples per plate, ONT bins and decoys.
+the queries (`--all-tags` uses all). Every tag ID you reference must exist here. Check your setup with `tagqc`.
 `tagqc --print columnwise|rowwise|plate` also prints every plate-map well with its tags: listed column by column (A1, B1, ..),
 row by row (A1, A2, ..), or drawn as a plate grid.
 

@@ -519,6 +519,23 @@ def load_layout(a):
     return read_plates(a.plates)
 
 
+def bin_design(design, layout):
+    """The plate-map wells the samples' ONT bins hold: in a MAB plate map every AB bin has the same tag pairs,
+    so the wells of other bins are not decoys of these samples. Plate maps without ont-barcode: every well."""
+    onts = {r["ont"] for r in layout}
+    if not any(r["ont"] for r in design) or "" in onts:
+        return design
+    return [r for r in design if r["ont"] in onts]
+
+
+def decoys_of(design, layout):
+    """Plate-map fwd tags, rev tags and tag pairs that are not in the sample rows: searched as decoys."""
+    fwd = {r["utag-fwd"] for r in design} - {r["utag-fwd"] for r in layout}
+    rev = {r["utag-rev"] for r in design} - {r["utag-rev"] for r in layout}
+    pairs = {(r["utag-fwd"], r["utag-rev"]) for r in design} - {(r["utag-fwd"], r["utag-rev"]) for r in layout}
+    return fwd, rev, pairs
+
+
 def tag_rows(a, layout):
     """Rows that decide which tags go into the query FASTAs. With a sample sheet, the tags of the
     library design (--plates) are added as decoys, so reads carrying a tag that is not in the sheet
@@ -531,14 +548,11 @@ def tag_rows(a, layout):
                    "as unexpected. Pass --plates <your plate map>, or --no-decoys to silence this.")
         return layout
     try:
-        design = read_plates(a.plates)
+        design = bin_design(read_plates(a.plates), layout)
     except SystemExit as e:
         print_note(f"plate map {a.plates} unreadable ({e}): no decoy tags are searched")
         return layout
-    used = {(r["utag-fwd"], r["utag-rev"]) for r in layout}
-    fwd = {r["utag-fwd"] for r in design} - {r["utag-fwd"] for r in layout}
-    rev = {r["utag-rev"] for r in design} - {r["utag-rev"] for r in layout}
-    pairs = {(r["utag-fwd"], r["utag-rev"]) for r in design} - used
+    fwd, rev, pairs = decoys_of(design, layout)
     a.decoys = dict(fwd=fwd, rev=rev, pairs=pairs,      # for run_summary.csv and decoys.tsv
                     rows=[r for r in design if (r["utag-fwd"], r["utag-rev"]) in pairs])
     print_info(f"decoys from {os.path.basename(a.plates)}: {len(fwd)} fwd + {len(rev)} rev tags not in the sample sheet; "
@@ -1319,9 +1333,9 @@ def cmd_twopass(a):
         sheet = os.path.join(bdir, "sheet.csv")
         with open(sheet, "w", newline="") as fh:
             w = csv.writer(fh, lineterminator="\n")
-            w.writerow(["sample", "plate", "well", "utag-fwd", "utag-rev"])
-            for r in bin_rows[b]:
-                w.writerow([r["plate-well"], r["plate"], r["well"], r["utag-fwd"], r["utag-rev"]])
+            w.writerow(["sample", "plate", "well", "utag-fwd", "utag-rev", "ont-barcode"])
+            for r in bin_rows[b]:      # ont-barcode: pass 2 takes decoys from this bin's plate-map wells only
+                w.writerow([r["plate-well"], r["plate"], r["well"], r["utag-fwd"], r["utag-rev"], r["ont"]])
         cmd = [sys.executable, os.path.abspath(__file__), "demux", "-r", *fs, "-c", ctx2,
                "-o", bdir, "-t", str(a.threads), "--barbell", barbell,
                "--samplesheet", sheet, "--plates", a.plates, "--tags", a.tags,
@@ -2054,10 +2068,44 @@ def plate_map_report(a, tags, layout):
         kv = [("samples", fmt_int(len(layout)))]
         if bins:
             kv.append(("ONT bins", ", ".join(f"{b} ({n})" for b, n in sorted(bins.items()))))
-        used = {(r["utag-fwd"], r["utag-rev"]) for r in layout}
-        kv.append(("decoys", f"{len(d_fwd - {r['utag-fwd'] for r in layout})} fwd + {len(d_rev - {r['utag-rev'] for r in layout})} rev tags; "
-                             f"{fmt_int(len(pairs - used))} plate-map wells not in the sheet are reported as unexpected"))
         print_kv(kv)
+        if getattr(a, "no_decoys", False):
+            print_info("--no-decoys: no plate-map tags are searched as decoys")
+        else:
+            decoy_report(design, layout, bins)
+
+
+def decoy_report(design, layout, bins):
+    """tagqc --samplesheet: the plate-map wells searched as decoys. demux searches every sample at once; twopass
+    searches each ONT bin for its own samples, so each bin has its own decoys. Decoy wells on the plates a set of
+    samples uses are listed: these are usually the negative controls."""
+    print_step("decoys")
+    nat = lambda p: [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", p)]
+    sets = [("demux", "all", layout)]
+    if bins:
+        sets += [("twopass", b, [r for r in layout if r["ont"] == b]) for b in sorted(bins, key=nat)]
+    rows, lists = [], []
+    for cmd, name, sub_ in sets:
+        d = design if cmd == "demux" else bin_design(design, sub_)          # MAB: a bin's own wells only
+        fwd, rev, pairs = decoys_of(d, sub_)
+        wells = [r for r in d if r["well"] and (r["utag-fwd"], r["utag-rev"]) in pairs]
+        plates = {r["plate"] for r in sub_ if r["well"]}
+        own = [r for r in wells if r["plate"] in plates]
+        rows.append([cmd, style(name, "cyan"), fmt_int(len(sub_)), fmt_int(len(fwd)), fmt_int(len(rev)),
+                     fmt_int(len(wells)), fmt_int(len(own))])
+        by_plate = defaultdict(list)
+        for r in own:
+            by_plate[r["plate"]].append(r["well"])
+        for plate in sorted(by_plate, key=nat):
+            wells = sorted(by_plate[plate], key=lambda w: (int(w[1:]), w[0]))         # column-wise: A1, B1 ...
+            shown = " ".join(wells[:24]) + (f" ... (+{len(wells) - 24})" if len(wells) > 24 else "")
+            lists.append([style(name, "cyan"), plate, fmt_int(len(wells)), shown])
+    print_table(["run", "samples of", "samples", "fwd tags", "rev tags", "wells", "on own plates"], rows, "<<>>>>>", indent=4)
+    print()
+    print_info("decoy wells = plate-map wells whose tag pair is not in the sample sheet; reads with them go to unexpected.tsv / decoys.tsv")
+    if lists:
+        print_step("decoy wells on the plates the samples use")
+        print_table(["samples of", "plate", "wells", "decoy wells"], lists, "<<><", indent=4)
 
 
 TAG_PALETTE = [196, 34, 33, 208, 129, 37, 201, 70, 63, 172, 31, 163,     # 256-colour codes, readable on dark and light
