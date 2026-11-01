@@ -461,6 +461,7 @@ th,td{padding:4px 8px;border-bottom:1px solid var(--grid);text-align:right;white
 th{color:var(--dim);font-weight:600;position:sticky;top:0;background:var(--panel)}
 th:first-child,td:first-child{text-align:left}
 td.pat{font-family:ui-monospace,Menlo,monospace;font-size:11.5px;text-align:left}th.pat{text-align:left}
+#pats:not(.showpat) .pat{display:none}
 #stab tr[data-k]{cursor:pointer}#stab tr[data-k]:hover td{background:var(--panel2)}#stab tr.sel td{color:var(--bad);font-weight:650}
 tr.key td{background:var(--hbg);font-weight:650}
 tr.sec td{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.05em;padding-top:12px;border-bottom:none}
@@ -513,9 +514,10 @@ table.narrow{width:auto}.narrow th:first-child,.narrow td:first-child{min-width:
   <section class="panel hidden" id="p1Panel"><h2>Pass 1: ONT barcodes</h2><div id="p1"></div></section>
   <section class="panel"><h2>Metrics<span class="ctl">
       <label class="multi"><input type="checkbox" id="diffOnly"> differences only</label>
-      <label><input type="checkbox" id="showPct" checked> show % of total</label></span></h2>
+      <label><select id="metMode"><option value="both">reads and % of total</option><option value="reads">reads</option><option value="pct">% of total</option></select></label></span></h2>
     <div id="metrics"></div></section>
   <section class="panel" id="patPanel"><h2>Top read patterns<span class="ctl">
+      <label><input type="checkbox" id="showPat"> show pattern text</label>
       <label><select id="patMode"><option value="share">share of reads with a hit</option><option value="reads">reads</option></select></label></span></h2>
     <div class="scroll"><table id="pats"></table></div></section>
   <section class="panel hidden" id="binPanel"><h2>ONT bins (twopass)</h2>
@@ -600,16 +602,17 @@ const shade = f => { const i = f <= 0 ? 0 : Math.min(5, 1 + Math.floor(f * 5)); 
 const isPctRow = k => /^(reads|pattern_reads|unexpected_reads)/.test(k);
 // the run summary as utag prints it: metric, value, % of total reads (for the read counts)
 function drawMetrics() {
-  const diffOnly = $("diffOnly").checked, showPct = $("showPct").checked, keys = [];
+  const diffOnly = $("diffOnly").checked, mode = $("metMode").value, showPct = mode === "both", keys = [];
   C.forEach(r => Object.keys(r.summary).forEach(k => keys.includes(k) || keys.push(k)));
   const ofTotal = k => k === "total_reads" || isPctRow(k);
   const many = C.length > 1, span = showPct ? 2 : 1;
   let h = many ? `<tr><th></th>${C.map(r => `<th class="run" colspan="${span}">${esc(r.label)}</th>`).join("")}</tr>` : "";
-  h += `<tr class="rule"><th>metric</th>${C.map(() => `<th class="${showPct ? "" : "gap"}">value</th>` + (showPct ? `<th class="gap">of total</th>` : "")).join("")}</tr>`;
+  h += `<tr class="rule"><th>metric</th>${C.map(() => `<th class="${showPct ? "" : "gap"}">${mode === "pct" ? "value / %" : "value"}</th>` + (showPct ? `<th class="gap">of total</th>` : "")).join("")}</tr>`;
   for (const k of keys) {
     const vals = C.map(r => r.summary[k]), defined = vals.filter(v => v !== undefined && v !== null);
     if (diffOnly && defined.every(v => v === defined[0])) continue;
     h += `<tr${k === "reads_assigned_to_samples" ? ' class="key"' : ""}><td>${esc(k)}</td>` + C.map(r => { const v = r.summary[k], t = r.summary.total_reads;
+      if (mode === "pct" && v !== undefined && ofTotal(k) && t) return `<td class="gap"><span class="cell" style="${shade(v / t)}" title="${fmt(v)} reads">${pf(100 * v / t)}</span></td>`;   // other rows: their value
       return `<td class="${showPct ? "" : "gap"}">${v === undefined ? "–" : fmt(v)}</td>` +
         (showPct ? `<td class="of gap">${v !== undefined && ofTotal(k) && t ? `<span class="cell" style="${shade(v / t)}">${pf(100 * v / t)}</span>` : ""}</td>` : ""); }).join("") + "</tr>";
   }
@@ -619,7 +622,7 @@ function drawMetrics() {
   $("metrics").innerHTML = out;
   $("sub").textContent = subLine();
 }
-$("diffOnly").onchange = drawMetrics; $("showPct").onchange = drawMetrics;
+$("diffOnly").onchange = drawMetrics; $("metMode").onchange = drawMetrics;
 drawMetrics();
 
 // ---- patterns
@@ -660,6 +663,7 @@ function drawPats() {
     `outlined = ${what[3]} only; the point shows the strand (fw → , rc ←).</td></tr>`;
 }
 $("patMode").onchange = drawPats; drawPats();
+$("showPat").onchange = e => $("pats").classList.toggle("showpat", e.target.checked);   // pattern text column, hidden by default
 
 // ---- ONT bins
 // bins matched across runs by their number (NB01 = barcode01, as in the sample sheet); row label = all names used
