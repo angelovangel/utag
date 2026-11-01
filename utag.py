@@ -23,10 +23,11 @@ from collections import Counter, defaultdict
 # ---- defaults ------------------------------------------------------------------------------------------------------
 PRIMER_F = "AGRGTTYGATYMTGGCTCAG"            # --primer-f  16S 27F
 PRIMER_R = "RGYTACCTTGTTACGACTT"             # --primer-r  16S 1492R
-TAGS = "data/utags-sequence.csv"             # --tags      9 nt utags (paths relative to this script's folder)
-PLATES = "data/utags-platemap.csv"           # --plates    CDI: 32 fwd x 12 rev utags = 4 x 96 wells
-MAB_TAGS = "data/utags-10bp-sequence.csv"    # --tags      for twopass -k SQK-MAB* (the MAB plate map's tag IDs)
+TAGS = "data/utags-10bp-sequence.csv"        # --tags      10 nt utags (paths relative to this script's folder)
+PLATES = "data/utags-10bp-platemap.csv"      # --plates    CDI: 12 fwd x 32 rev utags = 4 x 96 wells
 MAB_PLATES = "data/mab-udi-platemap.csv"     # --plates    for twopass -k SQK-MAB*: 24 AB barcodes x 12 utags (UDI)
+TAGS_9NT = "data/utags-9bp-sequence.csv"     # --tags      9 nt utags, picked when --plates is PLATES_9NT
+PLATES_9NT = "data/utags-9bp-platemap.csv"   # --plates    older CDI: 32 fwd x 12 rev 9 nt utags = 4 x 96 wells
 
 EXAMPLES = """\
 examples:
@@ -39,18 +40,18 @@ examples:
 
 INPUT_HELP = f"""\
 input file formats (defaults live in data/ next to this script):
-  --tags         {TAGS:<26} utag,sequence
-                                            U013,CAACAGTAG
-  --plates       {PLATES:<26} plate,well,utag-fwd,utag-rev
-                                            1,A1,U013,U001
-                 the full 384-well design: 4 plates; column 1-12 -> U001-U012,
-                 rows A-H -> U013-U020 on plate 1, U021-U028 on plate 2, ...
-  --samplesheet  your .csv or .xlsx         sample,plate,well[,ont-barcode]
-                                            Soil_A,1,A1[,NB01]
+  --tags         {TAGS:<30} utag,sequence
+                                                U001,GATCGAGTCA
+  --plates       {PLATES:<30} plate,well,utag-fwd,utag-rev
+                                                1,A1,U001,U013
+                 the full 384-well design: 4 plates; column 1-12 -> fwd U001-U012,
+                 rows A-H -> rev U013-U020 on plate 1, U021-U028 on plate 2, ...
+  --samplesheet  your .csv or .xlsx             sample,plate,well[,ont-barcode]
+                                                Soil_A,1,A1[,NB01]
                  (or sample,utag-fwd,utag-rev to give the tags directly)
 
   --tags and --plates describe the oligos and stay the same; the sample sheet is
-  the only file you write. Soil_A,1,A1 -> plate 1 well A1 = U013 + U001 (plate map)
+  the only file you write. Soil_A,1,A1 -> plate 1 well A1 = U001 + U013 (plate map)
   -> tag sequences (--tags) -> reads with that pair go to samples/Soil_A.fastq.
 
   No --samplesheet: every plate-map well is a sample (samples/Plate1-A1.fastq).
@@ -2485,7 +2486,7 @@ def main():
 
     def files(p):
         g = p.add_argument_group("input files (formats: end of this help)")
-        g.add_argument("--tags", metavar="CSV", help=f"tag sequences (default {TAGS}; twopass -k SQK-MAB*: {MAB_TAGS})")
+        g.add_argument("--tags", metavar="CSV", help=f"tag sequences (default {TAGS}; --plates {PLATES_9NT}: {TAGS_9NT})")
         g.add_argument("--plates", metavar="CSV", help=f"plate map, the tags in each well (default {PLATES}; twopass -k SQK-MAB*: {MAB_PLATES})")
         g.add_argument("--samplesheet", metavar="CSV|XLSX", help="sample names and wells (default: every plate-map well is a sample)")
         g.add_argument("--sheet-name", metavar="NAME", help="worksheet of an .xlsx sample sheet (default: first sheet)")
@@ -2588,8 +2589,8 @@ def main():
     if a.plates is None:
         a.plates = os.path.join(here, MAB_PLATES if mab else PLATES)
     if a.tags is None:
-        udi = os.path.basename(a.plates) == os.path.basename(MAB_PLATES)    # its tag IDs refer to MAB_TAGS
-        a.tags = os.path.join(here, MAB_TAGS if udi else TAGS)
+        nt9 = os.path.basename(a.plates) == os.path.basename(PLATES_9NT)    # its tag IDs refer to the 9 nt set
+        a.tags = os.path.join(here, TAGS_9NT if nt9 else TAGS)
     set_color(a.color)
     if getattr(a, "outdir", None) and a.cmd != "queries":
         start_log(a.outdir)           # everything printed is also saved to <outdir>/utag.log

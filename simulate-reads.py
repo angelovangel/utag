@@ -28,8 +28,8 @@ def mutate(s, sub=.03, ins=.01, dele=.01):
 ctx, n, out = sys.argv[1], int(sys.argv[2]), sys.argv[3]
 here = os.path.dirname(os.path.abspath(__file__))
 mab = ctx == "mab"
-tags = read_tags(os.path.join(here, "data", "utags-10bp-sequence.csv" if mab else "utags-sequence.csv"))
-plates = read_plates(os.path.join(here, "data", "mab-udi-platemap.csv" if mab else "utags-platemap.csv"))
+tags = read_tags(os.path.join(here, "data", "utags-10bp-sequence.csv"))
+plates = read_plates(os.path.join(here, "data", "mab-udi-platemap.csv" if mab else "utags-10bp-platemap.csv"))
 random.seed(1)
 adapter = {"nbd": "TTTTTTTTCCTGTACTTCGTTCAGTTACGTATTGCTAAGGTTAA" + NB_SEQS["NB01"] + "CAGCACCT",
            "lsk": "CCTGTACTTCGTTCAGTTACGTATTGCT",

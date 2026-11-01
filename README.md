@@ -31,7 +31,7 @@ utag twopass --dorado -r fastq_pass --samplesheet samples.csv -o twopass_out -t 
 utag twopass --pass1-only -r 'fastq_pass/**/*.fastq.gz' -k SQK-NBD114-96 -o twopass_out -t 16
 
 # MAB unique dual indexes: 24 AB barcodes x 12 utags = 288 samples (see "MAB: unique dual indexes")
-# (-k SQK-MAB* defaults to --plates data/mab-udi-platemap.csv --tags data/utags-10bp-sequence.csv)
+# (-k SQK-MAB* defaults to --plates data/mab-udi-platemap.csv)
 utag twopass -r 'fastq_pass/**/*.fastq.gz' -k SQK-MAB114-24 --samplesheet samples.csv -o mab_out -t 16
 ```
 
@@ -142,8 +142,8 @@ Other subcommands: `queries` (write the query FASTAs only), `tagqc` (check tags,
 
 | Option | Default | Format | Example row |
 |---|---|---|---|
-| `--tags` | `data/utags-sequence.csv` | `utag,sequence` (header optional) | `U013,CAACAGTAG` |
-| `--plates` | `data/utags-platemap.csv` | `plate,well,utag-fwd,utag-rev` | `1,A1,U013,U001` |
+| `--tags` | `data/utags-10bp-sequence.csv` | `utag,sequence` (header optional) | `U001,GATCGAGTCA` |
+| `--plates` | `data/utags-10bp-platemap.csv` | `plate,well,utag-fwd,utag-rev` | `1,A1,U001,U013` |
 | `--samplesheet` | none | `sample,plate,well[,ont-barcode]`, csv or `.xlsx` | `Soil_A,1,A1` |
 
 The tag file and the plate map describe the oligos you have, not the run. The tag file is just the sequence of each tag
@@ -152,7 +152,7 @@ whole library: 4 plates, 384 wells. Both come with the repo and you only change 
 different.
 
 The sample sheet is the part that changes from run to run. It says which of your samples went into which well, for example
-`Soil_A,1,A1`. The script looks up plate 1 well A1 in the plate map, finds `U013` + `U001`, takes their sequences from the tag
+`Soil_A,1,A1`. The script looks up plate 1 well A1 in the plate map, finds `U001` + `U013`, takes their sequences from the tag
 file, and writes every read with that tag pair to `samples/Soil_A.fastq`. If you already know the tags of a sample you can
 skip the plate map and write them directly (`sample,utag-fwd,utag-rev`).
 
@@ -161,14 +161,14 @@ Without a sample sheet every well in the plate map is treated as a sample and th
 the wells you did not list are searched as decoys, so reads from those wells end up in `unexpected.tsv` instead of in one of
 your samples. For samples given by their tags, `summary.tsv` also looks up their plate and well in the plate map.
 
-**Tags** (`--tags`): 96 tags of 9 nt (`U001`-`U096`), 5'->3' as in the oligo. Only tags used by the plate map / sample sheet go into
+**Tags** (`--tags`): 44 tags of 10 nt (`U001`-`U044`), 5'->3' as in the oligo. Only tags used by the plate map / sample sheet go into
 the queries (`--all-tags` uses all). Every tag ID you reference must exist here. Check your setup with `tagqc`: tag edit distances, the plate map's layout per plate (which tags run along rows / columns),
 duplicate wells, missing tag sequences, and with `--samplesheet` the samples per plate, ONT bins and decoys.
 `tagqc --print columnwise|rowwise|plate` also prints every plate-map well with its tags: listed column by column (A1, B1, ..),
 row by row (A1, A2, ..), or drawn as a plate grid.
 
-**Plate map** (`--plates`): the full library design, 4 plates x 96 wells. Column 1-12 = rev tags `U001`-`U012`; rows A-H = fwd tags
-`U013`-`U020` on plate 1, `U021`-`U028` on plate 2, `U029`-`U036` on plate 3, `U037`-`U044` on plate 4 (so plate 2 well C7 = `U023` + `U007`).
+**Plate map** (`--plates`): the full library design, 4 plates x 96 wells. Column 1-12 = fwd tags `U001`-`U012`; rows A-H = rev tags
+`U013`-`U020` on plate 1, `U021`-`U028` on plate 2, `U029`-`U036` on plate 3, `U037`-`U044` on plate 4 (so plate 2 well C7 = `U007` + `U023`).
 You don't edit or pass it unless your physical tag layout differs. A plate map may add an `ont-barcode` column (the ONT/AB
 barcode of each well, as in `data/mab-udi-platemap.csv`); a sample sheet with `plate,well` then inherits it.
 
@@ -182,7 +182,7 @@ Water_2,1,H12
 
 * `plate` may be written `1`, `Plate1` or `P1`; `well` as `A1` or `A01` (or `Plate1-A1` without a plate column).
 * Output is `samples/<sample>.fastq`; spaces and special characters in names become `_`. Only listed samples are written.
-* Instead of `plate,well` you can give the tags directly (`utag-fwd,utag-rev`, e.g. `U013,U001`), e.g. for tags without a plate layout.
+* Instead of `plate,well` you can give the tags directly (`utag-fwd,utag-rev`, e.g. `U001,U013`), e.g. for tags without a plate layout.
 * Headers are case-insensitive; column order and extra columns don't matter; blank rows are skipped.
   Excel: first worksheet, or `--sheet-name`; old `.xls` is not supported.
 * Duplicate names are an error, as are two samples in the same well (except in different `ont-barcode` bins).
@@ -215,8 +215,8 @@ demux_out/
 barbell names `trimmed/` files `<tag at read start>__<tag at read end>`, so each well gives two files, one per strand:
 
 ```
-barbell/trimmed/U013__U001.trimmed.fastq   forward-strand reads
-barbell/trimmed/U001__U013.trimmed.fastq   reverse-strand reads    -> both merged into samples/Plate1-A1.fastq
+barbell/trimmed/U001__U013.trimmed.fastq   forward-strand reads
+barbell/trimmed/U013__U001.trimmed.fastq   reverse-strand reads    -> both merged into samples/Plate1-A1.fastq
 ```
 
 Pairs not in the plate map / sample sheet (e.g. `U001__U037`) are not merged; they are listed in `unexpected.tsv`.
@@ -279,9 +279,8 @@ two top patterns should be `Ftag ... Rtag(rc)` and `Rtag ... Ftag(rc)`) -> `filt
 **Query FASTAs.** One per end; each entry is the full oligo `context + utag + primer`, 5'->3'. Ready-made files for the default primers are in `data/fasta/`; regenerate with `queries --primer-f ... --primer-r ...`.
 
 **This tag set.**
-* Rev tags `U001`-`U012` all start with `A`, so barbell folds that base into the flank and compares 8 nt instead of 9 (printed; works).
-* Minimum edit distance is 2 for rev tags (`U005`/`U011`), 3 for fwd tags: expect 0-2 wrong-well calls per ~1,400 assigned reads
-  in simulation. Raise `--min-score-diff` if that matters.
+* Minimum edit distance is 4 for fwd tags, 3 for rev tags (`tagqc` lists the closest pairs). Raise `--min-score-diff` if
+  wrong-well calls matter.
 * The 384-well grid is complete, so with the full plate map chimeras/index hopping cannot be detected; they land in a wrong well.
   With a sample sheet covering part of the grid, they show up in `unexpected.tsv`.
 
@@ -294,9 +293,9 @@ two top patterns should be `Ftag ... Rtag(rc)` and `Rtag ... Ftag(rc)`) -> `filt
 | File | Description |
 |---|---|
 | `utag.py` | The tool (`demux`, `twopass`, `context`, `queries`, `tagqc`) |
-| `data/utags-sequence.csv`, `data/utags-platemap.csv` | Default tags and plate map |
+| `data/utags-10bp-sequence.csv`, `data/utags-10bp-platemap.csv` | Default tags (10 nt, `U001`-`U044`) and plate map (columns = fwd, rows = rev tags) |
 | `data/samplesheet-example.csv`, `data/samplesheet-example-twopass.csv` | Example sample sheets (the second with `ont-barcode`) |
-| `data/utags-10bp-sequence.csv`, `data/utags-10bp-platemap.csv` | An alternative 10 nt tag set (`U001`-`U044`) and its plate map (rows = rev, columns = fwd tags); use with `--tags` and `--plates` |
+| `data/utags-9bp-sequence.csv`, `data/utags-9bp-platemap.csv` | The older 9 nt tag set (`U001`-`U096`) and its plate map (rows = fwd, columns = rev tags); `--plates data/utags-9bp-platemap.csv` picks these tags by itself |
 | `data/mab-udi-platemap.csv` | MAB unique dual index plate map: 24 AB barcodes x 12 utags (10 nt set), for `twopass -k SQK-MAB114-24` |
 | `data/fasta/` | Ready-made query FASTAs for the default primers |
 | `simulate-reads.py` | Fake reads with known truth: `python3 simulate-reads.py nbd 3000 sim.fastq` |
