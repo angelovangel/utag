@@ -206,6 +206,7 @@ demux_out/
   utag.log               everything the script printed, with date and command line
   barbell/
     inspect.txt                 most common read patterns
+    pattern_lengths.tsv         read length per pattern (top 50, 50 bp bins); the length heatmap in run_summary.html
     trimmed/                    per-tag-pair files (below)
     queries/                    the query FASTAs used
     annotation.tsv, filtered.tsv, dropped.tsv, trim_failed.txt, filters.txt, *.log

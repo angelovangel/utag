@@ -849,6 +849,42 @@ def show_patterns(path, top=8):
     print_table(["#", "reads", "share", f"pattern (top {min(top, len(pats))} of {uniq})"], rows, ">>><", indent=4)
 
 
+def inspect_cmd(barbell, anno, rp_out):
+    """barbell inspect; with -o (when this build has it) the pattern of each read, for pattern_lengths()"""
+    return [barbell, "inspect", "-i", anno, "-n", "500"] + (["-o", rp_out] if "--read-pattern-out" in help_text(barbell, "inspect") else [])
+
+
+def pattern_lengths(anno, rp, out, top=50, step=50):
+    """read length histogram per read pattern (top `top` patterns, `step` bp bins) -> out (pattern, length_bin, reads),
+    for the length heatmap in run_summary.html. rp: barbell inspect -o, one line per read in annotation.tsv order."""
+    if not os.path.exists(rp):
+        return None
+    def lengths():                            # (read id, read length) per read, in annotation.tsv order
+        last = None
+        with open(anno, newline="") as fh:
+            r = csv.reader(fh, delimiter="\t")
+            next(r, None)
+            for row in r:
+                k = row[0].split("\t")[0]
+                if k != last:
+                    last = k
+                    yield k, int(row[1])
+    hist, n = defaultdict(Counter), Counter()
+    with open(rp) as fh:
+        for (rid, ln), line in zip(lengths(), fh):
+            k, pat = line.split("\t", 1)[0], line.rstrip("\n").rsplit("\t", 1)[-1]
+            if k != rid:                      # not in annotation order: no histogram rather than a wrong one
+                return None
+            hist[pat][ln // step * step] += 1
+            n[pat] += 1
+    with open(out, "w") as fh:
+        fh.write("pattern\tlength_bin\treads\n")
+        for pat, _ in n.most_common(top):
+            fh.writelines(f"{pat}\t{b}\t{c}\n" for b, c in sorted(hist[pat].items()))
+    os.remove(rp)                             # per-read file: as large as annotation.tsv, not needed after this
+    return out
+
+
 def print_found_per_read(pc):
     tot_p = sum(pc.values()) or 1
     rows = []
@@ -926,8 +962,9 @@ def cmd_demux(a):
     run(cmd, os.path.join(bb, "annotate.log"))
 
     print_step("[3/6] inspect (top patterns -> inspect.txt)")
-    run([barbell, "inspect", "-i", anno, "-n", "500"], os.path.join(bb, "inspect.txt"))
+    run(inspect_cmd(barbell, anno, os.path.join(bb, "read_patterns.tsv")), os.path.join(bb, "inspect.txt"))
     show_patterns(os.path.join(bb, "inspect.txt"))
+    pattern_lengths(anno, os.path.join(bb, "read_patterns.tsv"), os.path.join(bb, "pattern_lengths.tsv"))
     pc = summarise_patterns(os.path.join(bb, "inspect.txt"))
     tot_p = sum(pc.values()) or 1
     print()
@@ -1241,8 +1278,10 @@ def pass1_only(reads, bins, out, barbell, kitdir):
     anno, insp = os.path.join(kitdir, "annotation.tsv"), os.path.join(out, "barbell", "pass1_inspect.txt")
     if os.path.exists(anno):
         print_step("pass 1 inspect (top patterns -> pass1_inspect.txt)")
-        run([barbell, "inspect", "-i", anno, "-n", "500"], insp)
+        rp = os.path.join(out, "barbell", "pass1_read_patterns.tsv")
+        run(inspect_cmd(barbell, anno, rp), insp)
         show_patterns(insp)
+        pattern_lengths(anno, rp, os.path.join(out, "barbell", "pass1_pattern_lengths.tsv"))
         print_info(f"{fmt_int(sum(n for n, _ in parse_patterns(insp)[1]))} reads with a pattern (share = of these)")
     print_step("pass 1 summary")
     print_summary(totals, n_total)

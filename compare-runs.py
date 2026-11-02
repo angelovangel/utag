@@ -71,7 +71,7 @@ def parse_log(path):
     r = {"log": path, "started": "", "cwd": "", "command": "", "subcommand": "", "context": "", "kit": "",
          "status": "incomplete", "barbell_seconds": 0.0, "steps": {}, "warnings": [], "errors": [],
          "summary": {}, "found": {}, "patterns": {}, "unique_patterns": None, "bins": {}, "info": [], "pass2": [],
-         "pass1": None, "pattern_reads": None}
+         "pass1": None, "pattern_reads": None, "lengths": read_lengths(os.path.dirname(path))}
     step, pass2_bin = "", None
     with open(path, encoding="utf-8", errors="replace") as fh:
         lines = fh.read().splitlines()
@@ -165,6 +165,7 @@ def parse_log(path):
     if r["subcommand"] == "twopass":            # the per-bin demux logs (pass 2), if still there: kept per bin,
         sub = sorted(glob.glob(os.path.join(os.path.dirname(path), "barbell", "pass2_utag", "*", "utag.log")))
         summed = not r["patterns"]               # and their patterns / tag counts summed for the whole run
+        sum_len = not r["lengths"]
         for p in sub:
             b = parse_log(p)
             b["label"] = os.path.basename(os.path.dirname(p))
@@ -175,9 +176,28 @@ def parse_log(path):
                 for k, v in b["patterns"].items():
                     r["patterns"][k] = r["patterns"].get(k, 0) + v
                 r["barbell_seconds"] += b["barbell_seconds"]
+            if sum_len:
+                for k, h in b["lengths"].items():
+                    t = r["lengths"].setdefault(k, {})
+                    for x, n in h.items():
+                        t[x] = t.get(x, 0) + n
         if sub and summed:
             r["info"].append(f"patterns summed over {len(sub)} per-bin logs (top patterns of each bin only)")
     return r
+
+
+def read_lengths(d):
+    """{pattern: {length bin start: reads}} from barbell/pattern_lengths.tsv (demux) or pass1_pattern_lengths.tsv
+    (twopass --pass1-only), written by utag; {} for older runs"""
+    for f in ("pattern_lengths.tsv", "pass1_pattern_lengths.tsv"):
+        p = os.path.join(d, "barbell", f)
+        if os.path.exists(p):
+            out = {}
+            with open(p, newline="") as fh:
+                for row in csv.DictReader(fh, delimiter="\t"):
+                    out.setdefault(row["pattern"], {})[int(row["length_bin"])] = int(row["reads"])
+            return out
+    return {}
 
 
 def read_samples(log, subcommand, ignore_bins=False):
@@ -409,16 +429,18 @@ def render_html(runs, base, title, top, theme="light"):
     for r in runs:
         for k, v in r["meta"].items():
             meta.setdefault(k, v)
+    pats = top_patterns(runs + [b for r in runs for b in r["pass2"]], top)
+    lens = lambda r: {p: r["lengths"][p] for p in pats if p in r["lengths"]}    # only the patterns in the table
     data = {
         "base": base, "meta": meta, "generated": time.strftime("%Y-%m-%d %H:%M"),
-        "foundLabels": FOUND_LABEL, "patterns": top_patterns(runs + [b for r in runs for b in r["pass2"]], top),
+        "foundLabels": FOUND_LABEL, "patterns": pats,
         "runs": [{**{k: r[k] for k in ("label", "log", "started", "cwd", "command", "subcommand", "context", "kit",
                                        "status", "steps", "warnings", "errors", "summary", "found", "patterns",
                                        "unique_patterns", "bins", "info", "samples", "decoys", "pass1", "pattern_reads")},
-                  "barbell_seconds": round(r["barbell_seconds"], 1),
+                  "barbell_seconds": round(r["barbell_seconds"], 1), "lengths": lens(r),
                   "pass2": [{**{k: b[k] for k in ("label", "status", "steps", "warnings", "errors", "summary", "found",
                                                   "patterns", "unique_patterns", "info")},
-                             "barbell_seconds": round(b["barbell_seconds"], 1)} for b in r["pass2"]]} for r in runs],
+                             "barbell_seconds": round(b["barbell_seconds"], 1), "lengths": lens(b)} for b in r["pass2"]]} for r in runs],
     }
     js = json.dumps(data, separators=(",", ":")).replace("</", "<\\/")
     attr = "" if theme == "auto" else f' data-theme="{theme}"'
@@ -508,6 +530,9 @@ table.narrow{width:auto}.narrow th:first-child,.narrow td:first-child{min-width:
 .term th:first-child,.term td:first-child{padding-right:24px}.term th.run{text-align:center;color:var(--ink)}
 .term td.of{color:var(--dim)}.term td.gap,.term th.gap{padding-right:18px}
 .note{color:var(--muted);font-size:11.5px;margin-top:6px;line-height:1.5}
+.lh{display:inline-flex;gap:1px;vertical-align:middle}.lh i{width:5px;height:14px;border-radius:1px}
+.lax{position:relative;height:13px;margin-top:2px;font-size:10px;font-weight:400;color:var(--muted)}
+.lax span{position:absolute;top:0;transform:translateX(-50%)}.lax span::before{content:"";position:absolute;left:50%;top:-2px;height:3px;border-left:1px solid var(--axis)}
 </style></head><body>
 <header><h1>__TITLE__</h1><div class="sub" id="sub"></div></header>
 <main>
@@ -518,7 +543,7 @@ table.narrow{width:auto}.narrow th:first-child,.narrow td:first-child{min-width:
     <div id="metrics"></div></section>
   <section class="panel" id="patPanel"><h2>Top read patterns<span class="ctl">
       <label><input type="checkbox" id="showPat"> show pattern text</label>
-      <label><select id="patMode"><option value="share">share of reads with a hit</option><option value="reads">reads</option></select></label></span></h2>
+      <label><select id="patMode"><option value="share">share of reads with a hit</option><option value="reads">reads</option><option value="len">length distribution</option></select></label></span></h2>
     <div class="scroll"><table id="pats"></table></div></section>
   <section class="panel hidden" id="binPanel"><h2>ONT bins (twopass)</h2>
     <div class="scroll"><table id="bins"></table></div></section>
@@ -647,22 +672,74 @@ function patRead(p) {
   }
   return svg + "</svg>";
 }
+// patterns shown: >= 1% of the reads with a pattern in a shown column (the top lists of small ONT bins, and of
+// low-depth runs, would add patterns of 1-2 reads)
+const patTot = C.map(r => Object.values(r.found).reduce((a, b) => a + b, 0) || r.pattern_reads || Object.values(r.patterns).reduce((a, b) => a + b, 0) || 1);
+const PATS = D.patterns.filter(p => C.some((r, i) => (r.patterns[p] || 0) >= 0.01 * patTot[i]));
+// read length per pattern (barbell/pattern_lengths.tsv, 50 bp bins): one heatmap strip per cell on a shared length axis,
+// up to the length that holds 99% of the reads shown (last bin open-ended); shade = reads in a bin / the cell's peak bin
+const hasLen = C.some(r => r.lengths && Object.keys(r.lengths).length);
+if (!hasLen) $("patMode").querySelector('[value="len"]').remove();
+const LEN = (() => {
+  if (!hasLen) return null;
+  const all = {}; let n = 0, step = 50;
+  C.forEach(r => PATS.forEach(p => Object.entries((r.lengths || {})[p] || {}).forEach(([x, c]) => { all[x] = (all[x] || 0) + c; n += c; })));
+  const xs = Object.keys(all).map(Number).sort((a, b) => a - b); let acc = 0, max = xs[xs.length - 1] || 0;
+  for (const x of xs) { acc += all[x]; if (acc >= 0.99 * n) { max = x + step; break; } }
+  max = Math.max(200, Math.ceil(max / 100) * 100);
+  if (max / step > 40) step = 100;
+  if (max / step > 40) { step = Math.ceil(max / 40 / 100) * 100; max = Math.ceil(max / step) * step; }
+  return {step, max, nb: max / step + 1};             // the last bin: >= max
+})();
+function lenStrip(h) {
+  const b = new Array(LEN.nb).fill(0);
+  Object.entries(h).forEach(([x, c]) => { b[Math.min(LEN.nb - 1, Math.floor(+x / LEN.step))] += c; });
+  const tot = b.reduce((a, c) => a + c, 0) || 1, peak = Math.max(...b) || 1;
+  return `<span class="lh">` + b.map((c, i) => `<i style="${shade(c / peak)}" data-i="${i}" data-n="${c}" data-f="${c / tot}"></i>`).join("") + `</span>`;
+}
+function lenAxis() {
+  const w = 6 * LEN.nb - 1, t = LEN.max <= 600 ? 100 : LEN.max <= 1500 ? 250 : LEN.max <= 3000 ? 500 : 1000;
+  let s = "";
+  for (let x = 0; x <= LEN.max; x += t) s += `<span style="left:${(x / LEN.step) * 6}px">${x >= 1000 ? x / 1000 + "k" : x}</span>`;
+  return `<div class="lax" style="width:${w}px;margin-left:auto">${s}</div>`;
+}
+// hover on a read drawing: what each symbol of that pattern means
+function patLegend(p) {
+  const kit = R.every(r => /\s--pass1-only\b/.test(r.command));
+  const name = {F: kit ? "ONT barcode, front flank" : "utag-fwd", R: kit ? "ONT barcode, rear flank" : "utag-rev"};
+  const where = {left: "at the read start", right: "at the read end", prev_left: "inside the read (a second hit: chimeric / concatenated read)"};
+  const rows = p.split("__").map(x => /^(F|R)(tag|flank)\[(fw|rc)\b.*@(left|right|prev_left)\b/.exec(x)).filter(Boolean).map(([, side, kind, strand, end]) =>
+    `<br><b style="color:var(${side === "F" ? "--s1" : "--s2"})">${side}</b> ${kind === "tag" ? (kit ? "barcode" : "utag") + " found (filled)" : (kit ? "flank" : "primer-flank") + " only, tag not read (outlined)"}` +
+    ` · ${name[side]} · ${strand === "fw" ? "forward (→)" : "reverse complement (←)"} · ${where[end]}`);
+  const kind = rows.length === 0 ? "" : /tag/.test(p) ? (p.match(/[FR]tag/g) || []).length === 2 && /Ftag/.test(p) && /Rtag/.test(p) ? "both tags: can be assigned" : "no tag pair: cannot be assigned" : "no tag: cannot be assigned";
+  return `<b>read pattern</b> <span class="t">${kind}</span>${rows.join("") || "<br>nothing recognised"}<br><span class="t mono">${esc(p)}</span>`;
+}
 function drawPats() {
-  if (!D.patterns.length) { $("patPanel").classList.add("hidden"); return; }
-  const mode = $("patMode").value;
-  const tot = C.map(r => Object.values(r.found).reduce((a, b) => a + b, 0) || r.pattern_reads || Object.values(r.patterns).reduce((a, b) => a + b, 0) || 1);
-  let h = `<tr><th>read</th><th class="pat">pattern</th>${C.map(r => `<th>${esc(r.label)}</th>`).join("")}</tr>`;
-  for (const p of D.patterns) { h += `<tr><td style="line-height:0">${patRead(p)}</td><td class="pat">${esc(p)}</td>` + C.map((r, i) => { const n = r.patterns[p];
+  if (!PATS.length) { $("patPanel").classList.add("hidden"); return; }
+  const mode = $("patMode").value, len = mode === "len", tot = patTot;
+  let h = `<tr><th>read</th><th class="pat">pattern</th>${C.map(r => `<th>${esc(r.label)}${len ? lenAxis() : ""}</th>`).join("")}</tr>`;
+  for (const p of PATS) { h += `<tr><td class="rd" style="line-height:0">${patRead(p)}</td><td class="pat">${esc(p)}</td>` + C.map((r, i) => { const n = r.patterns[p];
+      if (len) { const l = (r.lengths || {})[p];
+        return l ? `<td data-c="${i}">${lenStrip(l)}</td>` : `<td><span class="neu" title="${Object.keys(r.lengths || {}).length ? "not in this run's top patterns" : "no length data (run made before utag wrote pattern_lengths.tsv)"}">–</span></td>`; }
       if (n === undefined) return `<td><span class="neu">–</span></td>`; const f = n / tot[i];
       return `<td><span class="cell" style="${heat(f)}" title="${fmt(n)} reads">${mode === "share" ? pf(100 * f) : fmt(n)}</span></td>`; }).join("") + "</tr>"; }
   const kit = R.every(r => /\s--pass1-only\b/.test(r.command));   // barbell kit patterns: F / R = the ONT barcode
   const what = kit ? ["ONT barcode with its front flank", "ONT barcode with its rear flank", "barcode", "flank"] : ["utag-fwd", "utag-rev", "utag", "primer-flank"];
   $("pats").innerHTML = h + `<tr><td colspan="${C.length + 2}" class="neu" style="text-align:left;white-space:normal;font-size:11px">` +
-    `${kit ? "barbell kit patterns (pass 1). " : ""}Only the top patterns are in a log; – = not in that run's top list. ` +
+    `${kit ? "barbell kit patterns (pass 1). " : ""}Only the top patterns are in a log; – = not in that run's top list` +
+    `${D.patterns.length > PATS.length ? `; ${D.patterns.length - PATS.length} pattern(s) under 1% of the reads with a pattern not shown` : ""}. ` +
     `Read: <b style="color:var(--s1)">F</b> ${what[0]}, <b style="color:var(--s2)">R</b> ${what[1]} at that read end; filled = ${what[2]}, ` +
-    `outlined = ${what[3]} only; the point shows the strand (fw → , rc ←).</td></tr>`;
+    `outlined = ${what[3]} only; the point shows the strand (fw → , rc ←).` +
+    (len ? ` Length: read length in ${LEN.step} bp bins, last bin ≥ ${fmt(LEN.max)} bp; darker = more of that pattern's reads (scaled to each cell's peak bin).` : "") + `</td></tr>`;
 }
 $("patMode").onchange = drawPats; drawPats();
+$("pats").addEventListener("mouseover", e => { const b = e.target.closest(".lh i");   // length bins: the fast tip, as on the plates
+  const rd = e.target.closest("td.rd");
+  if (rd) return showTip(e, patLegend(PATS[rd.parentNode.rowIndex - 1]));
+  if (!b) return hideTip(); const i = +b.dataset.i, td = b.closest("td"), p = PATS[td.parentNode.rowIndex - 1];
+  showTip(e, `<b>${i < LEN.nb - 1 ? `${fmt(i * LEN.step)}–${fmt((i + 1) * LEN.step - 1)}` : `≥ ${fmt(LEN.max)}`} bp</b> <span class="t">${esc(C[+td.dataset.c].label)}</span>` +
+    `<br>${fmt(+b.dataset.n)} reads · ${pf(100 * b.dataset.f)} of this pattern<br><span class="t mono">${esc(p)}</span>`); });
+$("pats").addEventListener("mouseleave", hideTip);
 $("showPat").onchange = e => $("pats").classList.toggle("showpat", e.target.checked);   // pattern text column, hidden by default
 
 // ---- ONT bins
