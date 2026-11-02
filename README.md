@@ -151,6 +151,10 @@ ID. The plate map says which two tags (fwd and rev) were put into each well of t
 whole library: 4 plates, 384 wells. Both come with the repo and you only change them if your oligos or their layout are
 different.
 
+The files in `data/` need no path, from any folder: `--plates 9bp`, `--plates mab` (`10bp` is the default), `--tags 9bp`,
+or just the file name, e.g. `--plates utags-9bp-platemap.csv`. `--plates 9bp` picks the 9 nt tags by itself. A file that
+exists at the given path always wins.
+
 The sample sheet is the part that changes from run to run. It says which of your samples went into which well, for example
 `Soil_A,1,A1`. The script looks up plate 1 well A1 in the plate map, finds `U001` + `U013`, takes their sequences from the tag
 file, and writes every read with that tag pair to `samples/Soil_A.fastq`. If you already know the tags of a sample you can

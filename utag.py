@@ -28,6 +28,9 @@ PLATES = "data/utags-10bp-platemap.csv"      # --plates    CDI: 12 fwd x 32 rev 
 MAB_PLATES = "data/mab-udi-platemap.csv"     # --plates    for twopass -k SQK-MAB*: 24 AB barcodes x 12 utags (UDI)
 TAGS_9NT = "data/utags-9bp-sequence.csv"     # --tags      9 nt utags, picked when --plates is PLATES_9NT
 PLATES_9NT = "data/utags-9bp-platemap.csv"   # --plates    older CDI: 32 fwd x 12 rev 9 nt utags = 4 x 96 wells
+# short names for --plates / --tags (files in data/ can also be given by file name alone)
+PLATE_NAMES = {"10bp": PLATES, "9bp": PLATES_9NT, "mab": MAB_PLATES}
+TAG_NAMES = {"10bp": TAGS, "9bp": TAGS_9NT}
 
 EXAMPLES = """\
 examples:
@@ -59,6 +62,10 @@ input file formats (defaults live in data/ next to this script):
   the plate map's tags are still searched as decoys, so reads from unlisted wells
   are reported as unexpected (--no-decoys turns that off).
   ont-barcode (e.g. NB01) is only used by twopass. See README "Input files".
+
+  The files in data/ need no path: --plates 9bp | 10bp | mab, --tags 9bp | 10bp,
+  or the file name alone (--plates utags-9bp-platemap.csv). --plates 9bp picks
+  the 9 bp tags itself.
 """
 
 ANSI = {
@@ -204,6 +211,15 @@ def shorten(text):
         t = t.replace(DISPLAY_BASE[0] + os.sep, "./")
     home = os.path.expanduser("~")
     return t.replace(home, "~") if home and home != "/" else t
+
+
+def data_file(x, here, names):
+    """--plates/--tags value -> path: an existing file as given, else a short name (9bp, mab ..) or a
+    file name in data/ next to this script; anything else is returned unchanged (reported where it is read)"""
+    if x is None or os.path.exists(x) or os.path.dirname(x) not in ("", "data"):
+        return x
+    p = os.path.join(here, names.get(x.lower(), os.path.join("data", os.path.basename(x))))
+    return p if os.path.exists(p) else x
 
 
 def rel(path):
@@ -2573,8 +2589,8 @@ def main():
 
     def files(p):
         g = p.add_argument_group("input files (formats: end of this help)")
-        g.add_argument("--tags", metavar="CSV", help=f"tag sequences (default {TAGS}; --plates {PLATES_9NT}: {TAGS_9NT})")
-        g.add_argument("--plates", metavar="CSV", help=f"plate map, the tags in each well (default {PLATES}; twopass -k SQK-MAB*: {MAB_PLATES})")
+        g.add_argument("--tags", metavar="CSV", help=f"tag sequences, a file or 10bp|9bp (default {TAGS}; --plates 9bp: {TAGS_9NT})")
+        g.add_argument("--plates", metavar="CSV", help=f"plate map, the tags in each well, a file or 10bp|9bp|mab (default {PLATES}; twopass -k SQK-MAB*: {MAB_PLATES})")
         g.add_argument("--samplesheet", metavar="CSV|XLSX", help="sample names and wells (default: every plate-map well is a sample)")
         g.add_argument("--sheet-name", metavar="NAME", help="worksheet of an .xlsx sample sheet (default: first sheet)")
         g.add_argument("--no-decoys", action="store_true", help="with --samplesheet: do not search the other plate-map tags as decoys")
@@ -2670,6 +2686,8 @@ def main():
     run(t, barbell=False)
 
     a = ap.parse_args()
+    a.plates = data_file(a.plates, here, PLATE_NAMES)
+    a.tags = data_file(a.tags, here, TAG_NAMES)
     # defaults that depend on the library: a MAB kit is read from one tag, so it needs the unique dual index design
     mab = a.cmd == "twopass" and (a.kit or "").upper().startswith("SQK-MAB")
     a.mab_defaults = mab and a.plates is None
