@@ -1,5 +1,6 @@
 demo
-*_out 
+twopass_out*
+demux_out* 
 test
 .DS_Store
 run_comparison*

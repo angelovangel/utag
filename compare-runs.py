@@ -69,7 +69,7 @@ def num(s):
 
 def parse_log(path):
     r = {"log": path, "started": "", "cwd": "", "command": "", "subcommand": "", "context": "", "kit": "",
-         "status": "incomplete", "barbell_seconds": 0.0, "steps": {}, "warnings": [], "errors": [],
+         "status": "incomplete", "inputs": {}, "barbell_seconds": 0.0, "steps": {}, "warnings": [], "errors": [],
          "summary": {}, "found": {}, "patterns": {}, "unique_patterns": None, "bins": {}, "info": [], "pass2": [],
          "pass1": None, "pattern_reads": None, "lengths": read_lengths(os.path.dirname(path))}
     step, pass2_bin = "", None
@@ -81,9 +81,18 @@ def parse_log(path):
             if m:
                 r["started"], r["cwd"] = m.groups()
                 continue
+        if ln.startswith("# inputs: "):          # tag set, plate map, sample sheet as utag resolved them
+            try:
+                r["inputs"] = json.loads(ln[10:])
+            except ValueError:
+                pass
+            continue
         if ln.startswith("# ") and not r["command"]:
             r["command"] = ln[2:].strip()
             toks = r["command"].split()
+            for opt, key in (("--tags", "tags"), ("--plates", "plates"), ("--samplesheet", "samplesheet")):
+                if opt in toks and toks.index(opt) + 1 < len(toks):    # older logs: the files as given
+                    r["inputs"][key] = {"path": toks[toks.index(opt) + 1]}
             r["subcommand"] = next((t for t in toks if t in ("demux", "twopass", "check", "inspect")), "")
             for opt, key in (("-c", "context"), ("--context", "context"), ("-k", "kit"), ("--kit", "kit")):
                 if opt in toks and toks.index(opt) + 1 < len(toks):
@@ -434,7 +443,7 @@ def render_html(runs, base, title, top, theme="light"):
     data = {
         "base": base, "meta": meta, "generated": time.strftime("%Y-%m-%d %H:%M"),
         "foundLabels": FOUND_LABEL, "patterns": pats,
-        "runs": [{**{k: r[k] for k in ("label", "log", "started", "cwd", "command", "subcommand", "context", "kit",
+        "runs": [{**{k: r[k] for k in ("label", "log", "started", "cwd", "command", "subcommand", "context", "kit", "inputs",
                                        "status", "steps", "warnings", "errors", "summary", "found", "patterns",
                                        "unique_patterns", "bins", "info", "samples", "decoys", "pass1", "pattern_reads")},
                   "barbell_seconds": round(r["barbell_seconds"], 1), "lengths": lens(r),
@@ -468,6 +477,7 @@ body{margin:0;background:var(--bg);color:var(--ink);font:13px/1.45 system-ui,-ap
 header{padding:18px 24px 12px;border-bottom:1px solid var(--grid)}
 h1{margin:0;font-size:19px;font-weight:650}
 .sub{color:var(--dim);font-size:12px;margin-top:2px}
+.inp{display:flex;flex-wrap:wrap;gap:4px 18px;margin-top:6px}.inp b{color:var(--ink);font-weight:600}.inp .k{color:var(--muted)}
 main{max-width:1280px;margin:0 auto;padding:16px 24px 48px;display:grid;gap:16px}
 .panel{background:var(--panel);border:1px solid var(--ring);border-radius:12px;padding:14px 16px 16px;min-width:0}
 h2{margin:-14px -16px 12px;padding:8px 16px;min-height:38px;background:var(--hbg);border-bottom:1px solid var(--ring);border-radius:12px 12px 0 0;
@@ -534,7 +544,7 @@ table.narrow{width:auto}.narrow th:first-child,.narrow td:first-child{min-width:
 .lax{position:relative;height:13px;margin-top:2px;font-size:10px;font-weight:400;color:var(--muted)}
 .lax span{position:absolute;top:0;transform:translateX(-50%)}.lax span::before{content:"";position:absolute;left:50%;top:-2px;height:3px;border-left:1px solid var(--axis)}
 </style></head><body>
-<header><h1>__TITLE__</h1><div class="sub" id="sub"></div></header>
+<header><h1>__TITLE__</h1><div class="sub" id="sub"></div><div class="sub inp" id="inp"></div></header>
 <main>
   <section class="panel hidden" id="p1Panel"><h2>Pass 1: ONT barcodes</h2><div id="p1"></div></section>
   <section class="panel"><h2>Metrics<span class="ctl">
@@ -594,6 +604,21 @@ const subLine = () => SINGLE
   ? `${R[0].subcommand || "run"}${/\s--dorado\b/.test(R[0].command) ? " --dorado" : ""}${/\s--pass1-only\b/.test(R[0].command) ? " --pass1-only" : ""}${R[0].context ? " -c " + R[0].context : ""}${R[0].kit ? " -k " + R[0].kit : ""} · started ${R[0].started} · generated ${D.generated}`
   : `${R.length} runs · generated ${D.generated}`;
 $("sub").textContent = subLine();
+// the tag set, plate map and sample sheet: one entry per file, each run's label in front when the runs differ
+{
+  const base = p => String(p).split(/[\\/]/).pop();
+  const size = (k, f) => k === "tags" ? (f.n ? `${fmt(f.n)} tags × ${(f.nt || []).join("/")} nt` : "")
+    : f.n ? (f.plates ? `${fmt(f.plates)} plate${f.plates > 1 ? "s" : ""}, ` : "") + `${fmt(f.n)} ${k === "plates" ? "wells" : "samples"}` : "";
+  const item = (k, f) => f ? `<b title="${esc(f.path)}">${esc(base(f.path))}</b>${size(k, f) ? ` (${size(k, f)})` : ""}`
+    : k === "samplesheet" ? "none, every plate-map well is a sample" : "–";
+  const names = {tags: "tags", plates: "plate map", samplesheet: "sample sheet"};
+  // older logs only have the files given on the command line: leave out the ones not known for any run
+  const known = k => R.some(r => (r.inputs || {})[k]) || (k === "samplesheet" && known("tags"));
+  $("inp").innerHTML = Object.entries(names).filter(([k]) => known(k)).map(([k, n]) => {
+    const per = R.map(r => item(k, (r.inputs || {})[k])), same = per.every(x => x === per[0]);
+    return `<span><span class="k">${n}</span> ${same ? per[0] : R.map((r, i) => `${esc(r.label)}: ${per[i]}`).join(" · ")}</span>`;
+  }).join("");
+}
 // columns of the run views: the runs, or for one twopass run "all bins" + each ONT bin (pass 2)
 // (bins with < 0.1% of the reads, at least 10, are counted in "all bins" only)
 const P2 = SINGLE && R[0].pass2 ? R[0].pass2 : [], minBin = Math.max(10, 0.001 * ((R[0] && R[0].summary.total_reads) || 0));

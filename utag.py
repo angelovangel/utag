@@ -2233,12 +2233,34 @@ class Tee:
         return getattr(self.stream, name)
 
 
-def start_log(outdir, name="utag.log"):
+def input_files(a):
+    """The tag set, plate map and sample sheet of this run (resolved defaults included), with their size,
+    for the log header: run_summary.html shows them. Unreadable files are listed by path only."""
+    out = {}
+    for k in ("tags", "plates", "samplesheet"):
+        p = getattr(a, k, None)
+        if p:
+            out[k] = {"path": os.path.abspath(p)}
+    try:
+        seqs = list(read_tags(a.tags).values())
+        out["tags"].update(n=len(seqs), nt=sorted({len(x) for x in seqs}))
+    except (Exception, SystemExit):
+        pass
+    for k in ("plates", "samplesheet"):
+        try:
+            rows = read_table(a.plates if k == "plates" else a.samplesheet, getattr(a, "sheet_name", None) if k == "samplesheet" else None)
+            out[k].update(n=len(rows), plates=len({r.get("plate", "") for r in rows} - {""}))
+        except (Exception, SystemExit):
+            pass
+    return out
+
+
+def start_log(outdir, name="utag.log", inputs=None):
     os.makedirs(outdir, exist_ok=True)
     path = os.path.join(outdir, name)
     log = open(path, "w", buffering=1)
     log.write(f"# {time.strftime('%Y-%m-%d %H:%M:%S')}  cwd: {os.getcwd()}\n"
-              f"# {' '.join(sys.argv)}\n\n")
+              f"# {' '.join(sys.argv)}\n" + (f"# inputs: {json.dumps(inputs)}\n" if inputs else "") + "\n")
     sys.stdout, sys.stderr = Tee(sys.stdout, log), Tee(sys.stderr, log)
     return path
 
@@ -2698,7 +2720,7 @@ def main():
         a.tags = os.path.join(here, TAGS_9NT if nt9 else TAGS)
     set_color(a.color)
     if getattr(a, "outdir", None) and a.cmd != "queries":
-        start_log(a.outdir)           # everything printed is also saved to <outdir>/utag.log
+        start_log(a.outdir, inputs=input_files(a))   # everything printed is also saved to <outdir>/utag.log
     try:
         a.fn(a)
     except SystemExit as e:
