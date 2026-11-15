@@ -605,7 +605,7 @@ const hideTip = () => tip.style.display = "none";
 const SINGLE = R.length === 1;              // one run: a run summary, nothing to compare against
 if (SINGLE) document.body.classList.add("single");
 const subLine = () => SINGLE
-  ? `${R[0].subcommand || "run"}${/\s--dorado\b/.test(R[0].command) ? " --dorado" : ""}${/\s--pass1-only\b/.test(R[0].command) ? " --pass1-only" : ""}${R[0].context ? " -c " + R[0].context : ""}${R[0].kit ? " -k " + R[0].kit : ""} · started ${R[0].started} · generated ${D.generated}`
+  ? `generated ${D.generated}`
   : `${R.length} runs · generated ${D.generated}`;
 $("sub").textContent = subLine();
 // the tag set, plate map and sample sheet: one entry per file, each run's label in front when the runs differ
@@ -636,12 +636,13 @@ const fk = Object.keys(D.foundLabels);
 // ---- twopass pass 1: Dorado / MinKNOW bins or barbell kit
 const p1kind = r => !r.pass1 ? "" : /dorado/i.test(r.pass1.method) ? "Dorado / MinKNOW bins" : "barbell kit";
 // the bin lists ("38 ONT bins: barcode01, ...", "no samples listed for bin(s) ...") as a 96-well plate
-// (barcode01 = A1, barcode02 = B1, ... column by column); other bin names stay as text
+// (barcode01 / NB01 = A1, barcode02 / NB02 = B1, ... column by column); other bin names stay as text
 const p1lines = (r, ri) => { const lines = r.pass1.lines;
   const list = re => { const l = lines.find(x => re.test(x)); return l ? l.match(re)[1].split(", ") : null; };
   const binRe = /^• \d[\d,]* ONT bins: (.+)$/, skipRe = /^! no samples listed for bin\(s\) (.+): skipped in pass 2$/;
   const bins = list(binRe), skip = list(skipRe) || [];
-  const num = b => { const m = /^barcode(\d+)$/.exec(b); return m && +m[1] >= 1 && +m[1] <= 96 ? +m[1] : 0; };
+  const num = b => { const m = /^(?:barcode|NB)(\d+)$/.exec(b);   // Dorado barcode01, barbell kit NB01
+    return m && +m[1] >= 1 && +m[1] <= 96 ? +m[1] : 0; };
   const plate = bins && bins.every(num) && skip.every(num);
   const txt = l => `<div class="p1l ${l.startsWith("! ") ? "pw" : ""}">${esc(l.replace(/^[•!] /, ""))}</div>`;
   if (!plate) return lines.map(txt).join("");
@@ -673,7 +674,8 @@ if (R.some(r => r.pass1)) {
   const bnum = b => { const m = /(\d+)$/.exec(b); return m ? +m[1] : 0; };
   const p1tip = (r, n, st) => {
     const bc = `barcode${String(n).padStart(2, "0")}`, bn = Object.keys(r.bins || {}).find(b => bnum(b) === n), b = bn ? r.bins[bn] : null;
-    let h = `<b>${bc}</b> <span class="t">${st === "on" ? "pass 2" : st ? "no samples listed, skipped" : "no bin"}</span>`;
+    const nm = (r.pass1.lines.find(l => /^• \d[\d,]* ONT bins: /.test(l)) || "").split(/: |, /).find(x => bnum(x) === n) || bn || bc;
+    let h = `<b>${esc(nm)}</b> <span class="t">${st === "on" ? "pass 2" : st ? "no samples listed, skipped" : "no bin"}</span>`;
     if (b) { h += `<br><span class="t">reads</span> ${fmt(b.reads)}`;
       if (b.assigned !== undefined) h += `<br><span class="t">assigned</span> ${fmt(b.assigned)} (${pf(pc(b.assigned, b.reads))})`;
       if (b.samples_expected !== undefined) h += `<br><span class="t">samples with reads</span> ${fmt(b.samples_with_reads)} / ${fmt(b.samples_expected)}`; }
