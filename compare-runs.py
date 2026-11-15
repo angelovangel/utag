@@ -525,6 +525,10 @@ details summary{cursor:pointer;color:var(--dim)}
 .pl .pt small{color:var(--muted);font-weight:400}.pl .pt:hover{color:var(--s1)}
 .pg{display:grid;gap:2px;user-select:none;-webkit-user-select:none}
 .pg .h{font-size:9px;color:var(--muted);text-align:center;cursor:pointer;line-height:var(--cs)}.pg .h:hover{color:var(--ink)}
+.bcp{display:grid;grid-template-columns:12px repeat(12,22px);gap:2px;margin:6px 0 4px;font-size:9px;line-height:18px;text-align:center}
+.bcp .h{color:var(--muted)}.bcp .c{border-radius:3px;background:var(--q0);color:var(--muted)}
+.bcp .c.sk{background:var(--q1);color:var(--hink)}.bcp .c.on{background:var(--q4);color:#fff;font-weight:600}
+.bcl{display:flex;gap:4px 14px;flex-wrap:wrap;font-size:11px;color:var(--dim)}.bcl i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px}
 .w{width:var(--cs);height:var(--cs);border-radius:3px;background:var(--q0);cursor:pointer;position:relative}
 .w.none{background:transparent;border:1px dashed var(--grid);cursor:default}
 .w.neg{box-shadow:0 0 0 2px var(--panel),0 0 0 3.5px var(--bad)}
@@ -631,17 +635,40 @@ const fk = Object.keys(D.foundLabels);
 
 // ---- twopass pass 1: Dorado / MinKNOW bins or barbell kit
 const p1kind = r => !r.pass1 ? "" : /dorado/i.test(r.pass1.method) ? "Dorado / MinKNOW bins" : "barbell kit";
+// the bin lists ("38 ONT bins: barcode01, ...", "no samples listed for bin(s) ...") as a 96-well plate
+// (barcode01 = A1, barcode02 = B1, ... column by column); other bin names stay as text
+const p1lines = lines => {
+  const list = re => { const l = lines.find(x => re.test(x)); return l ? l.match(re)[1].split(", ") : null; };
+  const binRe = /^• \d[\d,]* ONT bins: (.+)$/, skipRe = /^! no samples listed for bin\(s\) (.+): skipped in pass 2$/;
+  const bins = list(binRe), skip = list(skipRe) || [];
+  const num = b => { const m = /^barcode(\d+)$/.exec(b); return m && +m[1] >= 1 && +m[1] <= 96 ? +m[1] : 0; };
+  const plate = bins && bins.every(num) && skip.every(num);
+  const txt = l => `<div class="p1l ${l.startsWith("! ") ? "pw" : ""}">${esc(l.replace(/^[•!] /, ""))}</div>`;
+  if (!plate) return lines.map(txt).join("");
+  const on = new Set(bins.map(num)), sk = new Set(skip.map(num));
+  let g = `<div class="bcp"><div></div>` + [...Array(12)].map((_, c) => `<div class="h">${c + 1}</div>`).join("");
+  for (let row = 0; row < 8; row++) {
+    g += `<div class="h">${"ABCDEFGH"[row]}</div>`;
+    for (let c = 0; c < 12; c++) {
+      const n = c * 8 + row + 1, k = sk.has(n) ? "sk" : on.has(n) ? "on" : "";
+      g += `<div class="c ${k}" title="barcode${String(n).padStart(2, "0")}${k === "on" ? ": pass 2" : k ? ": no samples, skipped" : ": no reads"}">${String(n).padStart(2, "0")}</div>`;
+    }
+  }
+  g += `</div><div class="bcl"><span><i style="background:var(--q4)"></i>pass 2 (${on.size - sk.size})</span>` +
+    `<span><i style="background:var(--q1)"></i>no samples listed, skipped (${sk.size})</span><span><i style="background:var(--q0)"></i>no bin</span></div>`;
+  return lines.map(l => binRe.test(l) ? `<div class="p1l">${bins.length} ONT bins</div>` + g : skipRe.test(l) ? "" : txt(l)).join("");
+};
 if (R.some(r => r.pass1)) {
   $("p1Panel").classList.remove("hidden");
-  $("p1").innerHTML = R.filter(r => r.pass1).map(r => `<div style="margin-bottom:10px">` +
-    `<div class="p1m">${SINGLE ? "" : `<span style="color:var(--dim);font-weight:400">${esc(r.label)}</span> · `}` +
-    `<span class="tag">${esc(p1kind(r))}</span>${esc(r.pass1.method)}</div>` +
+  $("p1").innerHTML = R.filter(r => r.pass1).map(r => `<details style="margin-bottom:10px">` +
+    `<summary class="p1m">${SINGLE ? "" : `<span style="color:var(--dim);font-weight:400">${esc(r.label)}</span> · `}` +
+    `<span class="tag">${esc(p1kind(r))}</span><span style="color:var(--ink)">${esc(r.pass1.method)}</span></summary>` +
     (/dorado/i.test(r.pass1.method)
       ? `<div class="p1l">The reads were already split by ONT barcode when they were basecalled (Dorado / MinKNOW barcodeNN folders or read headers); utag used those bins as they are.</div>`
       : /\s--pass1-only\b/.test(r.command)
       ? `<div class="p1l">utag split the reads by ONT barcode with barbell kit (and trimmed the barcode) into ont_bins/; --pass1-only: no utag demux.</div>`
       : `<div class="p1l">utag split the reads by ONT barcode with barbell kit (and trimmed the barcode) before searching the utags in each bin.</div>`) +
-    r.pass1.lines.map(l => `<div class="p1l ${l.startsWith("! ") ? "pw" : ""}">${esc(l.replace(/^[•!] /, ""))}</div>`).join("") + `</div>`).join("");
+    p1lines(r.pass1.lines) + `</details>`).join("");
   const kinds = [...new Set(R.map(p1kind).filter(Boolean))];
   $("binPanel").querySelector("h2").firstChild.textContent = `ONT bins (${kinds.join(", ")})`;
 }
