@@ -7,3 +7,5 @@ run_comparison*
 demux*
 *.html
 __pycache__/
+compare_out*
+

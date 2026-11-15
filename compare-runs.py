@@ -637,7 +637,7 @@ const fk = Object.keys(D.foundLabels);
 const p1kind = r => !r.pass1 ? "" : /dorado/i.test(r.pass1.method) ? "Dorado / MinKNOW bins" : "barbell kit";
 // the bin lists ("38 ONT bins: barcode01, ...", "no samples listed for bin(s) ...") as a 96-well plate
 // (barcode01 = A1, barcode02 = B1, ... column by column); other bin names stay as text
-const p1lines = lines => {
+const p1lines = (r, ri) => { const lines = r.pass1.lines;
   const list = re => { const l = lines.find(x => re.test(x)); return l ? l.match(re)[1].split(", ") : null; };
   const binRe = /^• \d[\d,]* ONT bins: (.+)$/, skipRe = /^! no samples listed for bin\(s\) (.+): skipped in pass 2$/;
   const bins = list(binRe), skip = list(skipRe) || [];
@@ -651,7 +651,7 @@ const p1lines = lines => {
     g += `<div class="h">${"ABCDEFGH"[row]}</div>`;
     for (let c = 0; c < 12; c++) {
       const n = c * 8 + row + 1, k = sk.has(n) ? "sk" : on.has(n) ? "on" : "";
-      g += `<div class="c ${k}" title="barcode${String(n).padStart(2, "0")}${k === "on" ? ": pass 2" : k ? ": no samples, skipped" : ": no reads"}">${String(n).padStart(2, "0")}</div>`;
+      g += `<div class="c ${k}" data-r="${ri}" data-n="${n}" data-s="${k}">${String(n).padStart(2, "0")}</div>`;
     }
   }
   g += `</div><div class="bcl"><span><i style="background:var(--q4)"></i>pass 2 (${on.size - sk.size})</span>` +
@@ -668,7 +668,24 @@ if (R.some(r => r.pass1)) {
       : /\s--pass1-only\b/.test(r.command)
       ? `<div class="p1l">utag split the reads by ONT barcode with barbell kit (and trimmed the barcode) into ont_bins/; --pass1-only: no utag demux.</div>`
       : `<div class="p1l">utag split the reads by ONT barcode with barbell kit (and trimmed the barcode) before searching the utags in each bin.</div>`) +
-    p1lines(r.pass1.lines) + `</details>`).join("");
+    p1lines(r, R.indexOf(r)) + `</details>`).join("");
+  // hover a barcode: its bin in this run, and the plates of the sample sheet in it (samples, reads)
+  const bnum = b => { const m = /(\d+)$/.exec(b); return m ? +m[1] : 0; };
+  const p1tip = (r, n, st) => {
+    const bc = `barcode${String(n).padStart(2, "0")}`, bn = Object.keys(r.bins || {}).find(b => bnum(b) === n), b = bn ? r.bins[bn] : null;
+    let h = `<b>${bc}</b> <span class="t">${st === "on" ? "pass 2" : st ? "no samples listed, skipped" : "no bin"}</span>`;
+    if (b) { h += `<br><span class="t">reads</span> ${fmt(b.reads)}`;
+      if (b.assigned !== undefined) h += `<br><span class="t">assigned</span> ${fmt(b.assigned)} (${pf(pc(b.assigned, b.reads))})`;
+      if (b.samples_expected !== undefined) h += `<br><span class="t">samples with reads</span> ${fmt(b.samples_with_reads)} / ${fmt(b.samples_expected)}`; }
+    const pl = new Map();
+    for (const [k, v] of Object.entries(r.samples || {})) { if (!k.includes("/") || bnum(k.slice(0, k.indexOf("/"))) !== n) continue;
+      const m = D.meta[k] || [], name = (m[0] || "").includes("/") ? m[0].slice(m[0].indexOf("/") + 1) : m[0] || "no plate";
+      const x = pl.get(name) || {n: 0, v: 0}; x.n++; x.v += v; pl.set(name, x); }
+    if (pl.size) h += `<br><span class="t">plates</span>` + [...pl.entries()].sort((a, b) => a[0].localeCompare(b[0], undefined, {numeric: true}))
+      .map(([name, x]) => `<br>${esc(name)} <span class="t">${fmt(x.n)} samples · ${fmt(x.v)} reads</span>`).join("");
+    return h; };
+  $("p1").addEventListener("mousemove", e => { const c = e.target.closest(".bcp .c[data-n]"); c ? showTip(e, p1tip(R[+c.dataset.r], +c.dataset.n, c.dataset.s)) : hideTip(); });
+  $("p1").addEventListener("mouseleave", hideTip);
   const kinds = [...new Set(R.map(p1kind).filter(Boolean))];
   $("binPanel").querySelector("h2").firstChild.textContent = `ONT bins (${kinds.join(", ")})`;
 }
