@@ -530,6 +530,10 @@ details summary{cursor:pointer;color:var(--dim)}
 .bcp .c.sk{background:var(--q1);color:var(--hink)}.bcp .c.on{background:var(--q4);color:#fff;font-weight:600}
 .bcl{display:flex;gap:4px 14px;flex-wrap:wrap;font-size:11px;color:var(--dim)}.bcl i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px}
 .w{width:var(--cs);height:var(--cs);border-radius:3px;background:var(--q0);cursor:pointer;position:relative}
+.nscale{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--dim);margin:2px 0 8px}
+.nscale i.z{width:12px;height:12px;border-radius:3px;background:var(--q0);margin-right:6px}
+.nscale .bar{position:relative;width:220px;height:12px;border-radius:3px}
+.nscale .bar b{position:absolute;top:0;bottom:0;width:1px;background:var(--panel);opacity:.8}.nscale .t{color:var(--muted)}
 .w.none{background:transparent;border:1px dashed var(--grid);cursor:default}
 .w.neg{box-shadow:0 0 0 2px var(--panel),0 0 0 3.5px var(--bad)}
 .w.neg::after{content:"";position:absolute;inset:30%;border-radius:50%;background:var(--panel)}
@@ -584,6 +588,7 @@ table.narrow{width:auto}.narrow th:first-child,.narrow td:first-child{min-width:
     <div class="note" style="margin-top:0">Click or drag over wells, or click a plate name, row or column, to mark them with the active mode (click again to undo).
       Negative = should have no reads (empty wells, an unused plate, NTCs). Excluded wells count nowhere (not loaded, known dropouts). All other wells are positives.
       Decoy wells (plate-map wells not in the sample sheet) start as negatives; the decoys button marks them all with the active mode.</div>
+    <div class="nscale" id="nscale"></div>
     <div class="plates" id="nplates"></div>
     <div id="nres"></div>
   </section>
@@ -644,6 +649,9 @@ const p1lines = (r, ri) => { const lines = r.pass1.lines;
   const num = b => { const m = /^(?:barcode|NB)(\d+)$/.exec(b);   // Dorado barcode01, barbell kit NB01
     return m && +m[1] >= 1 && +m[1] <= 96 ? +m[1] : 0; };
   const plate = bins && bins.every(num) && skip.every(num);
+  const skRe = /^• reads in skipped bins: (.+)$/, skLine = lines.find(l => skRe.test(l));
+  const skReads = skLine ? skLine.match(skRe)[1].split(", ").reduce((a, x) => a + +x.split(" ").pop().replace(/,/g, ""), 0)
+    : r.summary.reads_in_ont_bins !== undefined ? r.summary.reads_in_ont_bins - Object.values(r.bins || {}).reduce((a, b) => a + (b.reads || 0), 0) : null;
   const txt = l => `<div class="p1l ${l.startsWith("! ") ? "pw" : ""}">${esc(l.replace(/^[•!] /, ""))}</div>`;
   if (!plate) return lines.map(txt).join("");
   const on = new Set(bins.map(num)), sk = new Set(skip.map(num));
@@ -656,8 +664,8 @@ const p1lines = (r, ri) => { const lines = r.pass1.lines;
     }
   }
   g += `</div><div class="bcl"><span><i style="background:var(--q4)"></i>pass 2 (${on.size - sk.size})</span>` +
-    `<span><i style="background:var(--q1)"></i>no samples listed, skipped (${sk.size})</span><span><i style="background:var(--q0)"></i>no bin</span></div>`;
-  return lines.map(l => binRe.test(l) ? `<div class="p1l">${bins.length} ONT bins</div>` + g : skipRe.test(l) ? "" : txt(l)).join("");
+    `<span><i style="background:var(--q1)"></i>no samples listed, skipped (${sk.size}${sk.size && skReads !== null ? ` · ${fmt(skReads)} reads` : ""})</span><span><i style="background:var(--q0)"></i>no bin</span></div>`;
+  return lines.map(l => binRe.test(l) ? `<div class="p1l">${bins.length} ONT bins</div>` + g : skipRe.test(l) || skRe.test(l) ? "" : txt(l)).join("");
 };
 if (R.some(r => r.pass1)) {
   $("p1Panel").classList.remove("hidden");
@@ -676,6 +684,10 @@ if (R.some(r => r.pass1)) {
     const bc = `barcode${String(n).padStart(2, "0")}`, bn = Object.keys(r.bins || {}).find(b => bnum(b) === n), b = bn ? r.bins[bn] : null;
     const nm = (r.pass1.lines.find(l => /^• \d[\d,]* ONT bins: /.test(l)) || "").split(/: |, /).find(x => bnum(x) === n) || bn || bc;
     let h = `<b>${esc(nm)}</b> <span class="t">${st === "on" ? "pass 2" : st ? "no samples listed, skipped" : "no bin"}</span>`;
+    const sl = r.pass1.lines.find(l => /^• reads in skipped bins: /.test(l));
+    const sn = sl ? sl.replace(/^• reads in skipped bins: /, "").split(", ").find(x => bnum(x.split(" ")[0]) === n) : null;
+    if (!b && sn) h += `<br><span class="t">reads</span> ${esc(sn.split(" ").pop())}`;
+    else if (!b && st === "sk") h += `<br><span class="t">reads not counted in this run (utag counts them from now on)</span>`;
     if (b) { h += `<br><span class="t">reads</span> ${fmt(b.reads)}`;
       if (b.assigned !== undefined) h += `<br><span class="t">assigned</span> ${fmt(b.assigned)} (${pf(pc(b.assigned, b.reads))})`;
       if (b.samples_expected !== undefined) h += `<br><span class="t">samples with reads</span> ${fmt(b.samples_with_reads)} / ${fmt(b.samples_expected)}`; }
@@ -1010,7 +1022,7 @@ if (SR.length) (() => {
       buildPanels(); drawPlates(); analyse(); };
   }
   buildPanels();
-  const RAMP = ["#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b"].map(h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16)));
+  const RAMP = ["#440154", "#46327e", "#365c8d", "#277f8e", "#1fa187", "#4ac16d", "#a0da39", "#fde725"].map(h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16)));
   function ramp(t) { t = Math.max(0, Math.min(1, t)) * (RAMP.length - 1); const i = Math.min(RAMP.length - 2, Math.floor(t)), f = t - i;
     return "rgb(" + RAMP[i].map((v, j) => Math.round(v + (RAMP[i + 1][j] - v) * f)).join(",") + ")"; }
   $("ncol").innerHTML = SR.map((r, i) => `<option value="${i}">${esc(r.label)}</option>`).join("");
@@ -1038,8 +1050,13 @@ if (SR.length) (() => {
   function paint() {
     const run = SR[+$("ncol").value], mx = Math.max(1, ...Object.values(run.nv));
     $("nplates").querySelectorAll(".w[data-k]").forEach(el => { const k = el.dataset.k, v = run.nv[k], s = stateOf(k);
-      el.style.background = v > 0 ? ramp(Math.log10(v + 1) / Math.log10(mx + 1)) : "";
+      el.style.background = v > 0 ? ramp(Math.log10(v) / Math.log10(Math.max(10, mx))) : "";
       el.classList.toggle("neg", s === "neg"); el.classList.toggle("exc", s === "exc"); });
+    // colour scale: 1 read (dark purple) .. the run's busiest well (yellow), log; 0 reads = plate background
+    const lmx = Math.log10(Math.max(10, mx)), tks = [1, 10, 100, 1e3, 1e4, 1e5, 1e6].filter(t => t <= mx);
+    $("nscale").innerHTML = `<span>0</span><i class="z"></i><span>1</span><span class="bar" style="background:linear-gradient(90deg,${RAMP.map(c => `rgb(${c})`).join(",")})">` +
+      tks.map(t => `<b style="left:${100 * Math.log10(t) / lmx}%"></b>`).join("") + `</span><span>${fmt(mx)} reads</span>` +
+      `<span class="t">ticks ${tks.map(fmt).join(" · ")}</span>`;
     $("nplates").querySelectorAll(".pl").forEach(pl => { const ks = [...pl.querySelectorAll(".w[data-k]")].map(e => e.dataset.k);
       const nN = ks.filter(k => stateOf(k) === "neg").length, nE = ks.filter(k => stateOf(k) === "exc").length;
       pl.querySelector(".pt small").textContent = (nN ? nN + " neg" : "") + (nN && nE ? " · " : "") + (nE ? nE + " excl" : ""); });

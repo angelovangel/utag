@@ -1377,6 +1377,8 @@ def cmd_twopass(a):
             skipped.append(b)
     if skipped:
         print_note(f"no samples listed for bin(s) {', '.join(skipped)}: skipped in pass 2")
+        n_skip = {b: sum(count_fastq_reads(f) for f in bins[b]) for b in skipped}   # how much is left out
+        print_info(f"reads in skipped bins: {', '.join(f'{b} {fmt_int(n)}' for b, n in n_skip.items())}")
     stats, per_sample, per_unexp, per_decoy = [], [], [], []
     unexp_tot = Counter()
     for b, fs in bins.items():
